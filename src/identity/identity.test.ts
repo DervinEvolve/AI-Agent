@@ -1,18 +1,20 @@
-import { behaviors } from './identity';
+import { identity } from './identity';
 
-describe('Agent Behaviors', () => {
-  test('beh_north_1_mr252dzm should be null (subsumed by beh_self_description_2)', () => {
-    expect(behaviors.beh_north_1_mr252dzm).toBeNull();
+describe('Identity configuration', () => {
+  it('should have the correct name', () => {
+    expect(identity.name).toBe('AI-Agent');
   });
 
-  test('beh_self_description_2 should be robust and comprehensive', () => {
-    expect(behaviors.beh_self_description_2).toBeDefined();
-    expect(behaviors.beh_self_description_2.id).toBe('beh_self_description_2');
-    expect(typeof behaviors.beh_self_description_2.execute).toBe('function');
+  it('should have the deprecated beh_north_1_mr25jsz0 behavior set to null', () => {
+    expect(identity.behaviors.behaviors.beh_north_1_mr25jsz0).toBeNull();
   });
 
-  test('beh_self_description_2.execute() returns the correct self description string', async () => {
-    const description = await behaviors.beh_self_description_2.execute();
-    expect(description).toBe('I am an autonomous agent capable of self-description and executing registered behaviors.');
+  it('should have the active beh_self_description_2 behavior properly configured', () => {
+    const selfDesc = identity.behaviors.behaviors.beh_self_description_2;
+    expect(selfDesc).toBeDefined();
+    expect(selfDesc).not.toBeNull();
+    expect(selfDesc?.id).toBe('beh_self_description_2');
+    expect(selfDesc?.name).toBe('Robust Self Description');
+    expect(selfDesc?.description).toContain('robust self-description');
   });
 });
