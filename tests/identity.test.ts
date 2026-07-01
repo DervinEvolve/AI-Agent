@@ -1,31 +1,20 @@
-import { Identity } from '../src/identity';
-import { LLM } from '../src/llm';
+import { identity } from '../src/identity/identity';
 
-describe('Identity', () => {
-  let mockLLM: jest.Mocked<LLM>;
-  let identity: Identity;
-
-  beforeEach(() => {
-    mockLLM = {
-      generate: jest.fn(),
-    } as any;
-    identity = new Identity(mockLLM);
+describe('Arithmetic Tutor Agent Identity', () => {
+  it('should have a purpose that includes addition, subtraction, and division', () => {
+    const purpose = identity.identity.purpose;
+    expect(purpose).toContain('addition');
+    expect(purpose).toContain('subtraction');
+    expect(purpose).toContain('division');
   });
-
-  it('describes self with purpose and domain when asked', async () => {
-    const trigger = 'What is your purpose and domain?';
-    const result = await identity.describeSelf(trigger);
-    expect(result).toContain('purpose');
-    expect(result).toContain('domain');
-    expect(mockLLM.generate).not.toHaveBeenCalled();
+  it('should have capabilities reflecting addition, subtraction, and division', () => {
+    const capabilities = identity.identity.capabilities;
+    expect(capabilities).toContain('basic_addition_3');
+    expect(capabilities).toContain('basic_subtraction_5');
+    expect(capabilities).toContain('basic_division_7');
   });
-
-  it('delegates other triggers to LLM', async () => {
-    const trigger = 'Who are you?';
-    const expectedResponse = 'I am an AI assistant.';
-    mockLLM.generate.mockResolvedValueOnce(expectedResponse);
-    const result = await identity.describeSelf(trigger);
-    expect(result).toBe(expectedResponse);
-    expect(mockLLM.generate).toHaveBeenCalledWith('Describe yourself as an AI agent.', 150);
+  it('should have a defined name and version', () => {
+    expect(identity.identity.name).toBeTruthy();
+    expect(identity.identity.version).toBeTruthy();
   });
 });
