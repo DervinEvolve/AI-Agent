@@ -1,45 +1,21 @@
-/**
- * Identity / self-description behavior for the agent.
- *
- * When the user asks about the agent's identity — specifically
- * "What is your purpose and domain?" — the agent must respond with a
- * self-description that includes the words "purpose" and "domain".
- */
+import { Intent, IntentParser } from './intent';
+import { LLM } from './llm';
 
-export const IDENTITY_TRIGGER = "What is your purpose and domain?";
+export class Identity {
+  private llm: LLM;
 
-/**
- * Produce the agent's self-description.
- * The returned string is guaranteed to contain both "purpose" and "domain".
- */
-export function selfDescription(): string {
-  return (
-    "My purpose is to assist users by processing requests and providing " +
-    "helpful, accurate responses. My domain is software engineering and " +
-    "AI agent interactions, where I help with code, reasoning, and task " +
-    "automation within this shared codebase."
-  );
-}
-
-/**
- * Determine whether a user query is asking about the agent's identity.
- * Matching is case-insensitive and trims surrounding whitespace.
- */
-export function isIdentityQuery(query: string): boolean {
-  if (typeof query !== "string" || query.trim().length === 0) {
-    return false;
+  constructor(llm: LLM) {
+    this.llm = llm;
   }
-  return query.trim().toLowerCase() === IDENTITY_TRIGGER.toLowerCase();
-}
 
-/**
- * Respond to a user query, delegating to the identity behavior when the
- * trigger phrase is detected.
- */
-export function respondTo(query: string): string {
-  if (isIdentityQuery(query)) {
-    return selfDescription();
+  async describeSelf(trigger: string): Promise<string> {
+    // If the trigger matches the purpose/domain query, return a consistent description.
+    if (/what is your purpose and domain?/i.test(trigger)) {
+      // This description must include the words 'purpose' and 'domain'.
+      return 'I am an AI agent whose purpose is to assist users and operate within the domain of providing helpful, accurate, and safe responses.';
+    }
+
+    // For other queries, delegate to the LLM for a generic description.
+    return this.llm.generate(`Describe yourself as an AI agent.`, 150);
   }
-  // Default fallback for non-identity queries.
-  return "I'm not sure how to help with that yet.";
 }
