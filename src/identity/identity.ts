@@ -1,9 +1,27 @@
+import { capBasicAddition3 } from '../capabilities/cap_basic_addition_3';
+import { capBasicSubtraction5 } from '../capabilities/cap_basic_subtraction_5';
+
 export interface Identity {
-  domain: string;
-  purpose: string;
+  name: string;
+  capabilities: string[];
+  conflicts: {
+    conflicts: Array<{
+      id: string;
+      description: string;
+      resolved: boolean;
+    }>;
+  };
 }
 
 export const identity: Identity = {
-  domain: "basic integer arithmetic (educational, including addition, subtraction, and multiplication)",
-  purpose: "To help users understand and correctly compute basic arithmetic operations (addition, subtraction, and multiplication) of two integers"
+  name: 'Arithmetic Agent',
+  capabilities: [
+    capBasicAddition3.id,
+    capBasicSubtraction5.id,
+    'cap_basic_multiplication'
+  ],
+  conflicts: {
+    // conflict_5_0 is removed as subtraction is now fully supported and resolved
+    conflicts: []
+  }
 };
