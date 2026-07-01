@@ -1,1 +1,1 @@
-export * from './identity/identity';
+export { identity, Identity } from './identity/identity';
