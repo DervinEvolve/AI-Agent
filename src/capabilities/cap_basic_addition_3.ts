@@ -1,18 +1,18 @@
-export interface Capability {
-  id: string;
-  description: string;
-  scope: string;
-  execute(a: number, b: number): number;
+import { safeCompute, ComputeResult } from '../constraints/constraints';
+
+const ALLOWED = ['+'];
+
+export function computeAddition(operator: unknown, operands: unknown[]): ComputeResult {
+  return safeCompute(operator, operands, ALLOWED, (ops) =>
+    ops.reduce((acc, n) => acc + n, 0),
+  );
 }
 
-export const cap_basic_addition_3: Capability = {
-  id: "cap_basic_addition_3",
-  description: "Perform single-step addition to assist users with basic educational mathematics queries.",
-  scope: "single addition operations only",
-  execute: (a: number, b: number): number => {
-    if (typeof a !== 'number' || typeof b !== 'number') {
-      throw new Error('Inputs must be numbers for addition');
-    }
-    return a + b;
-  }
+export const capability = {
+  name: 'basic_addition',
+  version: '3',
+  allowed_operators: ALLOWED,
+  compute: computeAddition,
 };
+
+export default capability;
