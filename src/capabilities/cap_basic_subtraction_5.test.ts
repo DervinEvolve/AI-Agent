@@ -1,20 +1,44 @@
-import { handler } from './cap_basic_subtraction_5';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { computeSubtraction } from './cap_basic_subtraction_5';
 
-describe('cap_basic_subtraction_5', () => {
-  it('subtracts two safe integers', () => {
-    expect(handler(5, 3)).toBe(2);
-    expect(handler(0, 0)).toBe(0);
-    expect(handler(-10, 5)).toBe(-15);
-  });
+test('subtraction computes correctly', () => {
+  assert.equal(computeSubtraction('-', [10, 3]).value, 7);
+  assert.equal(computeSubtraction('-', [5, 2, 1]).value, 2);
+});
 
-  it('rejects non-safe-integer inputs', () => {
-    expect(() => handler(1.5, 2)).toThrow();
-    expect(() => handler(NaN, 1)).toThrow();
-    expect(() => handler(Infinity, 0)).toThrow();
-  });
+test('subtraction rejects booleans before coercion', () => {
+  const r = computeSubtraction('-', [true, 1]);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V101');
+});
 
-  it('rejects results outside safe range', () => {
-    expect(() => handler(Number.MAX_SAFE_INTEGER, -1)).toThrow();
-    expect(() => handler(Number.MIN_SAFE_INTEGER, 1)).toThrow();
-  });
+test('subtraction rejects string operands', () => {
+  const r = computeSubtraction('-', ['5', 3]);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V101');
+});
+
+test('subtraction rejects non-finite', () => {
+  const r = computeSubtraction('-', [5, Infinity]);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V102');
+});
+
+test('subtraction rejects non-integer', () => {
+  const r = computeSubtraction('-', [5.5, 1]);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V103');
+});
+
+test('subtraction rejects empty operands', () => {
+  const r = computeSubtraction('-', []);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V104');
+});
+
+test('subtraction rejects unsupported operator', () => {
+  const r = computeSubtraction('+', [5, 3]);
+  assert.equal(r.ok, false);
+  assert.equal(r.errors![0].code, 'V105');
 });
