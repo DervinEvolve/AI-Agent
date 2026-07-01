@@ -5,11 +5,17 @@ export interface Constraint {
   added_epoch: number;
 }
 
-export const constraints: Record<string, Constraint> = {
-  con_reject_out_of_scope_5: {
-    id: "con_reject_out_of_scope_5",
-    description: "When a query requests floating-point arithmetic, chained operations, numbers outside safe integer range, or any operation beyond the active capabilities, the agent must explicitly state that the request is out of scope and refuse to perform it.",
-    status: "active",
+export const constraints: Constraint[] = [
+  {
+    id: 'con_foundational_1',
+    description: 'The agent is strictly limited to basic integer arithmetic education.',
+    status: 'active',
+    added_epoch: 1
+  },
+  {
+    id: 'con_avoid_general_calculator_5',
+    description: 'The agent must never present itself as a general-purpose calculator or claim capabilities outside the explicitly defined arithmetic operations.',
+    status: 'active',
     added_epoch: 5
   }
-};
+];
