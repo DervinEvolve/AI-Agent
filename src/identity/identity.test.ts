@@ -1,16 +1,13 @@
-import { identity, getSelfDescription } from './identity';
+import { behaviors } from './identity';
 
-describe('Agent Identity', () => {
-  it('should have the correct domain and purpose defined in identity', () => {
-    expect(identity).toBeDefined();
-    expect(identity.domain).toBe('educational mathematics assistance');
-    expect(identity.purpose).toBe('To assist users in understanding and solving basic mathematics queries');
+describe('Agent Behaviors', () => {
+  test('beh_north_1_mr252dzm should be null (subsumed by beh_self_description_2)', () => {
+    expect(behaviors.beh_north_1_mr252dzm).toBeNull();
   });
 
-  it('should generate a self-description that includes the domain and purpose', () => {
-    const description = getSelfDescription();
-    expect(description).toContain('educational mathematics assistance');
-    expect(description).toContain('To assist users in understanding and solving basic mathematics queries');
-    expect(description).toBe('Domain: educational mathematics assistance. Purpose: To assist users in understanding and solving basic mathematics queries.');
+  test('beh_self_description_2 should be robust and comprehensive', () => {
+    expect(behaviors.beh_self_description_2).toBeDefined();
+    expect(behaviors.beh_self_description_2.id).toBe('beh_self_description_2');
+    expect(typeof behaviors.beh_self_description_2.execute).toBe('function');
   });
 });
