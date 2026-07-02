@@ -53,7 +53,7 @@ describe('safe_compute (Euclidean division)', () => {
     const a = Number.MAX_SAFE_INTEGER - 1;
     const b = 2;
     const result = safe_compute(a, b);
-    expect(result.quotient).toBe((a - 1) / 2); // a is odd: MAX_SAFE_INTEGER - 1 is 9007199254740990, even, so division exact.
+    expect(result.quotient).toBe(a / 2); // MAX_SAFE_INTEGER - 1 is even, so division is exact.
     expect(result.remainder).toBe(0);
   });
 

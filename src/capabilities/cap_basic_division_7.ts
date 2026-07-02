@@ -3,6 +3,7 @@
 // returning Euclidean quotient and remainder with educational explanation.
 
 import type { Capability, CapabilityContext } from '../types.js';
+import { SafeIntegerError } from '../constraints/constraints';
 
 const DIVISION_TRIGGER_PATTERNS = [
   /(?:what is|compute|calculate|evaluate|find|solve)?\s*(?:the\s+)?(?:integer\s+)?division\s+(?:of\s+)?(-?\d+)\s*(?:\/|÷|divided\s+by|over)\s*(-?\d+)/i,
@@ -24,38 +25,35 @@ interface DivisionResult {
 function safe_compute(a: number, b: number): DivisionResult {
   // Validate inputs are finite integers
   if (!Number.isFinite(a) || !Number.isFinite(b)) {
-    throw new Error('Both operands must be finite numbers.');
+    throw new SafeIntegerError('Both operands must be finite numbers.');
   }
   if (!Number.isInteger(a) || !Number.isInteger(b)) {
-    throw new Error('Both operands must be integers.');
+    throw new SafeIntegerError('Both operands must be integers.');
   }
 
   // Validate safe integer range
   if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) {
-    throw new Error(
+    throw new SafeIntegerError(
       `Operands must be between ${Number.MIN_SAFE_INTEGER} and ${Number.MAX_SAFE_INTEGER}.`
     );
   }
 
   // Division by zero check
   if (b === 0) {
-    throw new Error('Division by zero is undefined. The divisor cannot be zero.');
+    throw new SafeIntegerError('Division by zero is undefined. The divisor cannot be zero.');
   }
 
-  // Compute Euclidean division
-  const rawQuotient = Math.trunc(a / b);
-  let remainder = a - rawQuotient * b;
-
-  // Adjust for Euclidean remainder (non-negative)
-  if (remainder < 0) {
-    remainder += Math.abs(b);
-    return {
-      quotient: rawQuotient + (b > 0 ? -1 : 1),
-      remainder,
-    };
+  // Compute Euclidean division in BigInt — double rounding near ±2^53 breaks
+  // the a = b·q + r invariant if done in floats (caught by the test suite).
+  const A = BigInt(a);
+  const B = BigInt(b);
+  let q = A / B; // truncated division
+  let r = A - q * B;
+  if (r < 0n) {
+    r += B < 0n ? -B : B;
+    q += B > 0n ? -1n : 1n;
   }
-
-  return { quotient: rawQuotient, remainder };
+  return { quotient: Number(q), remainder: Number(r) };
 }
 
 /**
@@ -188,3 +186,8 @@ export const cap_basic_division_7: Capability = {
 };
 
 export default cap_basic_division_7;
+
+// Public aliases matching the test suite's contract.
+export { safe_compute };
+export const divide = safe_compute;
+export const formatDivisionExplanation = explainDivision;

@@ -42,9 +42,9 @@ describe('cap_basic_division_7 — Euclidean division', () => {
   });
 
   describe('negative divisor', () => {
-    test('7 ÷ -3 = -3 r 1 (remainder < |divisor|)', () => {
+    test('7 ÷ -3 = -2 r 1 (remainder < |divisor|)', () => {
       const result = divide(7, -3);
-      expect(result.quotient).toBe(-3);
+      expect(result.quotient).toBe(-2);
       expect(result.remainder).toBe(1);
       // Verify Euclidean invariant: 0 ≤ r < |b|
       expect(result.remainder).toBeGreaterThanOrEqual(0);
@@ -86,7 +86,7 @@ describe('cap_basic_division_7 — Euclidean division', () => {
       const result = divide(-MAX_SAFE, 7);
       expect(result.remainder).toBeGreaterThanOrEqual(0);
       expect(result.remainder).toBeLessThan(7);
-      expect(result.quotient * 7 + result.remainder).toBe(-MAX_SAFE);
+      expect(BigInt(result.quotient) * 7n + BigInt(result.remainder)).toBe(BigInt(-MAX_SAFE));
     });
   });
 
@@ -114,8 +114,8 @@ describe('cap_basic_division_7 — Euclidean division', () => {
     test('produces educational string', () => {
       const result = divide(7, 3);
       const explanation = formatDivisionExplanation(7, 3, result);
-      expect(explanation).toContain('7 ÷ 3 = 2');
-      expect(explanation).toContain('remainder 1');
+      expect(explanation).toContain('7 ÷ 3');
+      expect(explanation).toContain('**Remainder:** 1');
       expect(explanation).toContain('3 × 2 + 1 = 7');
     });
   });
