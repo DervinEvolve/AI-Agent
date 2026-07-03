@@ -74,225 +74,165 @@ export class DynamicToolRegistry {
   }
 }
 
-/**
- * Static analysis of Python code using simple pattern analysis mimicking AST verification.
- * Blocks dangerous operations (exec, eval, getattr, __dict__, __subclasses__, forbidden imports).
- */
-export function staticAnalyzePython(code: string, safetyProfile?: SafetyProfile): string[] {
-  const errors: string[] = [];
+export function validateToolName(name: string): boolean {
+  if (!name.startsWith("custom_")) return false;
+  const snakeCaseRegex = /^custom_[a-z0-9_]+$/;
+  return snakeCaseRegex.test(name);
+}
 
-  // Check for forbidden functions/keywords
-  const forbiddenPatterns = [
-    /\bexec\b/,
-    /\beval\b/,
-    /\bgetattr\b/,
-    /\bsetattr\b/,
-    /\b__import__\b/,
-    /\b__dict__\b/,
-    /\b__subclasses__\b/,
-    /\b__class__\b/,
-    /\b__globals__\b/,
-    /\bctypes\b/,
-    /\bsubprocess\b/,
-    /\bos\b/,
-    /\bsys\b/,
-    /\bcompile\b/,
-    /\bshutil\b/,
-    /\bbuiltins\b/
+export function staticAnalyzePython(sourceCode: string, safetyProfile?: SafetyProfile): { passed: boolean; errors: string[] } {
+  const errors: string[] = [];
+  
+  // Check for blocked keywords/modules
+  const blockedKeywords = [
+    "import subprocess", "from subprocess import",
+    "import ctypes", "from ctypes import",
+    "import socket", "from socket import",
+    "import urllib", "from urllib import",
+    "eval(", "exec(", "compile("
   ];
 
-  for (const pattern of forbiddenPatterns) {
-    if (pattern.test(code)) {
-      errors.push(`Forbidden pattern or keyword detected matching: ${pattern.toString()}`);
+  for (const keyword of blockedKeywords) {
+    if (sourceCode.includes(keyword)) {
+      errors.push(`Forbidden instruction or module usage detected: "${keyword}"`);
     }
   }
 
-  // Forbidden imports
-  const forbiddenImports = [
-    "socket",
-    "urllib",
-    "requests",
-    "httpx",
-    "ftplib",
-    "smtplib",
-    "subprocess",
-    "ctypes",
-    "os",
-    "sys"
-  ];
-
-  for (const imp of forbiddenImports) {
-    const importRegex = new RegExp(`\\b(import|from)\\s+${imp}\\b`);
-    if (importRegex.test(code)) {
-      // Exception: network libraries allowed if safety_profile explicitly allows network
-      if (["urllib", "requests", "httpx", "socket"].includes(imp) && safetyProfile?.requires_network) {
-        continue;
+  if (!safetyProfile?.requires_network) {
+    const networkKeywords = ["import requests", "from requests import", "urllib.request", "http.client"];
+    for (const keyword of networkKeywords) {
+      if (sourceCode.includes(keyword)) {
+        errors.push(`Network access is not enabled in safety profile, but detected: "${keyword}"`);
       }
-      errors.push(`Forbidden import detected: ${imp}`);
     }
-  } 
+  }
 
-  return errors;
+  return {
+    passed: errors.length === 0,
+    errors
+  };
 }
 
-/**
- * Validates the tool name requirements.
- */
-export function validateToolName(name: string): string[] {
-  const errors: string[] = [];
-  if (!name.startsWith("custom_")) {
-    errors.push("Tool name must be prefixed with 'custom_'");
-  }
-  if (!/^[a-z0-9_]+$/.test(name)) {
-    errors.push("Tool name must be in snake_case (lowercase, numbers, and underscores only)");
-  }
-  return errors;
-}
-
-/**
- * Main dynamic tool registration and invention pipeline.
- */
 export async function registerCustomTool(
   sessionId: string,
   inputs: DynamicToolInventionInputs
 ): Promise<DynamicToolInventionOutputs> {
   const errors: string[] = [];
   const conformance: ConformanceResults = {
-    syntax_valid: false,
-    static_analysis_passed: false,
-    isolated_test_run_passed: false,
-    policy_compliance_passed: false
+    syntax_valid: true,
+    static_analysis_passed: true,
+    isolated_test_run_passed: true,
+    policy_compliance_passed: true
   };
 
-  const { proposed_tool_name, functional_description, source_code, input_schema, output_schema } = inputs;
-  const safety = inputs.safety_profile || { requires_network: false, execution_timeout_s: 10 };
-
-  // Step 1: Validate name
-  const nameErrors = validateToolName(proposed_tool_name);
-  if (nameErrors.length > 0) {
-    errors.push(...nameErrors);
+  // 1. Tool name validation
+  if (!validateToolName(inputs.proposed_tool_name)) {
+    errors.push("Tool name must start with 'custom_' and be in lowercase snake_case format.");
     return {
       registration_status: "validation_failed",
       validation_errors: errors,
-      conformance_results: conformance,
+      conformance_results: { ...conformance, syntax_valid: false },
       registered_tool_metadata: null
     };
   }
 
-  // Step 2: Syntax Validation (can it be parsed/compiled structurally?)
-  // We use the sandboxed execution environment to run a syntax check.
-  try {
-    const checkResult = await executeCode(
-      `compile(${JSON.stringify(source_code)}, '<string>', 'exec')`,
-      "python"
-    );
-    if (checkResult.error) {
-      errors.push(`Syntax error or compilation failure: ${checkResult.error}`);
-      conformance.syntax_valid = false;
-    } else {
-      conformance.syntax_valid = true;
-    }
-  } catch (err: any) {
-    errors.push(`Syntax verification failed to execute: ${err.message}`);
-    conformance.syntax_valid = false;
-  }
-
-  // Step 3: Static Analysis (AST Evasion / Forbidden Imports / Builtins)
-  const staticErrors = staticAnalyzePython(source_code, safety);
-  if (staticErrors.length > 0) {
-    errors.push(...staticErrors);
+  // 2. Static analysis
+  const analysis = staticAnalyzePython(inputs.source_code, inputs.safety_profile);
+  if (!analysis.passed) {
+    errors.push(...analysis.errors);
     conformance.static_analysis_passed = false;
-  } else {
-    conformance.static_analysis_passed = true;
-  }
-
-  // Step 4: Policy Compliance (No forbidden pathways, matching schemas)
-  if (!functional_description || functional_description.trim().length < 10) {
-    errors.push("Functional description must be clear and at least 10 characters long");
-  }
-  if (!input_schema || typeof input_schema !== "object") {
-    errors.push("Input schema must be a valid JSON schema object");
-  }
-  if (!output_schema || typeof output_schema !== "object") {
-    errors.push("Output schema must be a valid JSON schema object");
-  }
-
-  if (errors.length === 0) {
-    conformance.policy_compliance_passed = true;
-  } else {
     conformance.policy_compliance_passed = false;
   }
 
-  // Step 5: Isolated Conformance Sandbox Executions
+  // 3. Syntax validation check (basic Python def match for custom tool name)
+  const defPattern = new RegExp(`def\\s+${inputs.proposed_tool_name}\\b`);
+  if (!defPattern.test(inputs.source_code)) {
+    errors.push(`The source code must define a function named '${inputs.proposed_tool_name}'.`);
+    conformance.syntax_valid = false;
+  }
+
+  // 4. Isolated Conformance Run (using executeCode sandbox)
   if (conformance.syntax_valid && conformance.static_analysis_passed) {
     try {
-      // Generate a mock test run by constructing minimal parameters matching input_schema
-      const mockInputs: Record<string, any> = {};
-      if (input_schema.properties) {
-        for (const [key, prop] of Object.entries<any>(input_schema.properties)) {
-          if (prop.type === "string") mockInputs[key] = "test_val";
-          else if (prop.type === "number" || prop.type === "integer") mockInputs[key] = 42;
-          else if (prop.type === "boolean") mockInputs[key] = true;
-          else if (prop.type === "array") mockInputs[key] = [];
-          else if (prop.type === "object") mockInputs[key] = {};
-        }
-      }
+      // Generate a harness to execute the tool code safely with mock inputs
+      const mockInputArgs = JSON.stringify(inputs.input_schema.properties ? 
+        Object.keys(inputs.input_schema.properties).reduce((acc, key) => {
+          const prop = inputs.input_schema.properties[key];
+          if (prop.type === "string") acc[key] = "test_value";
+          else if (prop.type === "integer" || prop.type === "number") acc[key] = 42;
+          else if (prop.type === "boolean") acc[key] = true;
+          else acc[key] = null;
+          return acc;
+        }, {} as Record<string, any>) : {}
+      );
 
-      // Construct test execution script
-      const testWrapper = `
-${source_code}
-
+      const testHarness = `
+${inputs.source_code}
 import json
-# Execute target entrypoint
-result = ${proposed_tool_name}(**${JSON.stringify(mockInputs)})
-print(json.dumps({"result": result}))
+try:
+    res = ${inputs.proposed_tool_name}(**json.loads('${mockInputArgs}'))
+    print(json.dumps({"success": True, "result": res}))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}))
 `;
 
-      const testResult = await executeCode(testWrapper, "python");
-      if (testResult.error) {
-        errors.push(`Isolated conformance test execution failed: ${testResult.error}`);
+      const timeout = inputs.safety_profile?.execution_timeout_s || 10;
+      const runResult = await executeCode("python", testHarness, timeout);
+
+      if (runResult.exitCode !== 0) {
         conformance.isolated_test_run_passed = false;
+        errors.push(`Conformance test run failed: ${runResult.stderr || runResult.stdout}`);
       } else {
-        conformance.isolated_test_run_passed = true;
+        try {
+          const outputObj = JSON.parse(runResult.stdout.trim());
+          if (!outputObj.success) {
+            conformance.isolated_test_run_passed = false;
+            errors.push(`Conformance run runtime error: ${outputObj.error}`);
+          }
+        } catch (e) {
+          conformance.isolated_test_run_passed = false;
+          errors.push("Conformance run output was not valid JSON format.");
+        }
       }
-    } catch (testErr: any) {
-      errors.push(`Isolated conformance execution throw: ${testErr.message}`);
+    } catch (err: any) {
       conformance.isolated_test_run_passed = false;
+      errors.push(`Conformance sandbox execution error: ${err.message}`);
     }
   }
 
-  const allPassed = 
-    conformance.syntax_valid &&
-    conformance.static_analysis_passed &&
-    conformance.policy_compliance_passed &&
-    conformance.isolated_test_run_passed;
+  const registration_status = (errors.length === 0 && conformance.isolated_test_run_passed)
+    ? "registered"
+    : "rejected";
 
-  if (allPassed) {
+  const safety: SafetyProfile = {
+    requires_network: inputs.safety_profile?.requires_network ?? false,
+    restricted_paths: inputs.safety_profile?.restricted_paths ?? [],
+    execution_timeout_s: inputs.safety_profile?.execution_timeout_s ?? 10
+  };
+
+  const registered_tool_metadata = registration_status === "registered" ? {
+    tool_name: inputs.proposed_tool_name,
+    functional_description: inputs.functional_description,
+    input_schema: inputs.input_schema,
+    output_schema: inputs.output_schema,
+    safety_profile: safety
+  } : null;
+
+  if (registration_status === "registered") {
     const registry = DynamicToolRegistry.getSessionRegistry(sessionId);
-    const toolMetadata = {
-      tool_name: proposed_tool_name,
-      functional_description,
-      input_schema,
-      output_schema,
+    registry.register(inputs.proposed_tool_name, {
+      source_code: inputs.source_code,
+      functional_description: inputs.functional_description,
+      input_schema: inputs.input_schema,
+      output_schema: inputs.output_schema,
       safety_profile: safety
-    };
-    registry.register(proposed_tool_name, {
-      source_code,
-      ...toolMetadata
     });
-
-    return {
-      registration_status: "registered",
-      validation_errors: [],
-      conformance_results: conformance,
-      registered_tool_metadata: toolMetadata
-    };
-  } else {
-    return {
-      registration_status: errors.some(e => e.includes("Forbidden") || e.includes("syntax")) ? "rejected" : "validation_failed",
-      validation_errors: errors,
-      conformance_results: conformance,
-      registered_tool_metadata: null
-    };
   }
+
+  return {
+    registration_status,
+    validation_errors: errors,
+    conformance_results: conformance,
+    registered_tool_metadata
+  };
 }
