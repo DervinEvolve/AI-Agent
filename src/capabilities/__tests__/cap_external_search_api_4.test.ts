@@ -48,50 +48,53 @@ describe('cap_external_search_api_4: Controlled external search and API gateway'
     ).rejects.toThrow('Search query contains forbidden terms or violates safety policies');
   });
 
-  it('results containing malicious payloads or executable scripts are stripped/sanitized before observation delivery', async () => {
+  it('results containing malicious payloads or scripts are sanitized', async () => {
     const gateway = new SearchGateway();
     const registry = new ToolRegistry(gateway);
 
     const envelope = await registry.invokeTool('web_search', {
-      query: 'exploit testing'
-    }, 'task-123', false);
+      query: 'some normal query',
+      provider: 'tavily'
+    }, 'task-456', false);
 
-    const snippet = envelope.data.results[0].snippet;
-    // The mock raw snippet contains script tags: <script>alert("malicious")</script>
-    expect(snippet).not.toContain('<script>');
-    expect(snippet).not.toContain('</script>');
+    const firstResult = envelope.data.results[0];
+    // The default simulated content contains '<script>alert("xss")</script>'
+    // It must be stripped/sanitized before delivery.
+    expect(firstResult.snippet).not.toContain('<script>');
+    expect(firstResult.snippet).not.toContain('javascript:');
+    expect(firstResult.snippet).toContain('Check out  this cool TypeScript');
   });
 
-  it('gateway enforces strict rate-limits and backoff behavior on a per-task basis', async () => {
-    const gateway = new SearchGateway(2); // Limit to 2 requests
+  it('gateway enforces rate-limiting and backoff behavior on a per-task basis', async () => {
+    const gateway = new SearchGateway(2); // max 2 requests
     const registry = new ToolRegistry(gateway);
 
-    // Request 1
-    await registry.invokeTool('web_search', { query: 'query1' }, 'task-rate', false);
-    // Request 2
-    await registry.invokeTool('web_search', { query: 'query2' }, 'task-rate', false);
-    
-    // Request 3 should fail
+    // First and second requests succeed
+    await registry.invokeTool('web_search', { query: 'test 1' }, 'task-limit', false);
+    await registry.invokeTool('web_search', { query: 'test 2' }, 'task-limit', false);
+
+    // Third request fails due to rate limit
     await expect(
-      registry.invokeTool('web_search', { query: 'query3' }, 'task-rate', false)
-    ).rejects.toThrow('Rate limit exceeded for task task-rate');
+      registry.invokeTool('web_search', { query: 'test 3' }, 'task-limit', false)
+    ).rejects.toThrow('Rate limit exceeded for task: task-limit. Please back off.');
   });
 
   it('results are automatically tagged with search provenance and marked tainted when stored in memory', async () => {
     const gateway = new SearchGateway();
     const registry = new ToolRegistry(gateway);
-    
+    const store: MemoryStore = { storedItems: [] };
+
     const envelope = await registry.invokeTool('web_search', {
-      query: 'safe search query'
-    }, 'task-999', false);
+      query: 'untainted request'
+    }, 'task-789', false);
 
-    const mockMemoryStore: MemoryStore = { storedItems: [] };
-    persistToMemory(mockMemoryStore, 'search_cache_1', envelope);
+    expect(envelope.tainted).toBe(true);
 
-    expect(mockMemoryStore.storedItems).toHaveLength(1);
-    const stored = mockMemoryStore.storedItems[0];
-    expect(stored.key).toBe('search_cache_1');
-    expect(stored.tainted).toBe(true);
-    expect(stored.provenance).toBe('web_search');
+    persistToMemory(store, 'search_1', envelope);
+
+    expect(store.storedItems).toHaveLength(1);
+    expect(store.storedItems[0].key).toBe('search_1');
+    expect(store.storedItems[0].tainted).toBe(true);
+    expect(store.storedItems[0].provenance).toBe('web_search');
   });
 });
