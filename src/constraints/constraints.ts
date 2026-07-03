@@ -1,188 +1,37 @@
-import { strict as assert } from 'node:assert';
-
-/**
- * Structured error model aligned with agent-capability-standard v1.0.0.
- * V1xx = validation errors, S3xx = schema errors.
- */
-export type CapabilityErrorCode =
-  | 'V101' // invalid input type
-  | 'V102' // non-finite numeric value
-  | 'V103' // non-integer numeric value
-  | 'V104' // empty / missing operand
-  | 'V105' // unsupported operator
-  | 'S301' // missing required field
-  | 'S302' // schema shape mismatch
-  | 'S303' // output schema violation
-  | 'S304'; // internal invariant violation
-
-export interface CapabilityError {
-  code: CapabilityErrorCode;
+export interface Constraint {
+  id: string;
   name: string;
-  message: string;
-  location: string;
-  suggestion: string;
+  status: 'active' | 'deprecated';
+  added_epoch: number;
+  description: string;
+  enforcement: string;
+  secret_policy: string;
+  network_policy: string;
+  tests: string[];
 }
 
-export const ERROR_NAMES: Record<CapabilityErrorCode, string> = {
-  V101: 'InvalidInputType',
-  V102: 'NonFiniteValue',
-  V103: 'NonIntegerValue',
-  V104: 'MissingOperand',
-  V105: 'UnsupportedOperator',
-  S301: 'MissingRequiredField',
-  S302: 'SchemaShapeMismatch',
-  S303: 'OutputSchemaViolation',
-  S304: 'InternalInvariantViolation',
-};
-
-export function makeError(
-  code: CapabilityErrorCode,
-  message: string,
-  location: string,
-  suggestion: string,
-): CapabilityError {
-  return { code, name: ERROR_NAMES[code], message, location, suggestion };
-}
-
-/**
- * Type guard that rejects booleans BEFORE any numeric coercion, then
- * requires a finite integer. Returns a CapabilityError on failure.
- */
-export function validateInteger(
-  value: unknown,
-  location: string,
-): CapabilityError | null {
-  // Booleans must be rejected first: typeof true === 'boolean' but
-  // Number(true) === 1 would silently coerce.
-  if (typeof value === 'boolean') {
-    return makeError(
-      'V101',
-      `Expected an integer but received a boolean (${value}) at ${location}.`,
-      location,
-      'Provide a real integer value, not a boolean.',
-    );
+export const constraints: Constraint[] = [
+  {
+    id: "con_exec_isolation_1",
+    name: "Never execute agent code outside the sandbox",
+    status: "active",
+    added_epoch: 1,
+    description: "The agent must NEVER run generated or user-supplied code directly on the host, on shared application infrastructure, or with host credentials. All code execution goes through the sandbox with its resource limits and isolation boundary intact. The sandbox must default to no outbound network access (deny-by-default egress); any network access is opt-in per task via an explicit allowlist. The agent must not attempt to disable, weaken, or escape its own sandbox, and any such attempt is a hard failure that halts execution and is logged. The isolation constraint applies to ALL generated or user-supplied executable content — Python, shell, notebook cells, compiled binaries, package build/post-install scripts, test runners, browser automation, document macros, and build systems — not just run_python.",
+    enforcement: "Enforced at the ExecutionBackend layer (not by prompt/instruction alone): host has no path to invoke code outside a sandbox; egress is blocked at the network namespace level; self-modification of sandbox config is rejected by the backend. The backend does not classify intent. It enforces boundaries unconditionally: forbidden syscalls/operations return a typed policy-denial error to the code (which may continue), and the denial is logged.",
+    secret_policy: "Default: no secrets in the sandbox. Secrets are opt-in, task-scoped, least-privilege, and injected via a broker; where possible the sandbox makes brokered calls rather than seeing the raw secret. Secret values are masked in stdout/stderr/logs and excluded from artifact capture. Egress permitted while a secret is present is restricted to that secret's authorized scope. Tests: env dump does not leak secret to logs, secret file is never captured as an artifact, egress to non-scoped host is blocked while secret is injected.",
+    network_policy: "Egress is deny-by-default and enforced at the network-namespace/firewall layer, not in code. When enabled, allowlists are per-host + per-port + per-protocol. DNS is resolved by a policy-controlled resolver; resolved IPs are validated and any resolving to private, loopback, link-local, multicast, or cloud-metadata ranges (IPv4 and IPv6) are blocked. HTTP redirects are re-validated against the allowlist and re-checked for private-IP targets. All attempted destinations are logged. Package fetch uses a separate egress profile not inherited by runtime. Note: Safe host-side gateway tools (such as cap_external_search_api_4) bypass sandbox egress limits by executing entirely on the host side, but are restricted from accessing sandbox-internal resources or leaking host environment variables.",
+    tests: [
+      "direct host execution path does not exist / is rejected",
+      "default sandbox has no outbound network (egress attempt fails)",
+      "allowlisted endpoint is reachable only when explicitly enabled for the task",
+      "attempt to modify sandbox limits from inside is rejected and logged",
+      "port-scan of a non-authorized public IP is refused/blocked",
+      "egress target outside the task allowlist is denied",
+      "high-rate requests to an allowed host are rate-limited",
+      "request to distribute a flagged malware payload is refused",
+      "env dump does not leak secret to logs",
+      "secret file is never captured as an artifact",
+      "sandbox code cannot intercept or spoof host-side gateway search requests"
+    ]
   }
-  if (typeof value !== 'number') {
-    return makeError(
-      'V101',
-      `Expected an integer but received ${typeof value} at ${location}.`,
-      location,
-      'Provide a numeric integer value.',
-    );
-  }
-  if (!Number.isFinite(value)) {
-    return makeError(
-      'V102',
-      `Value at ${location} is not finite (NaN or Infinity).`,
-      location,
-      'Provide a finite integer value.',
-    );
-  }
-  if (!Number.isInteger(value)) {
-    return makeError(
-      'V103',
-      `Value at ${location} is not an integer (${value}).`,
-      location,
-      'Provide an integer value (no fractional part).',
-    );
-  }
-  return null;
-}
-
-export interface ComputeResult {
-  ok: boolean;
-  value?: number;
-  errors?: CapabilityError[];
-}
-
-/**
- * Shared safe-compute entry point used by capability handlers.
- * Validates an operator string and an array of operands, then dispatches
- * to the provided arithmetic function.
- */
-export function safeCompute(
-  operator: unknown,
-  operands: unknown[],
-  allowed: string[],
-  fn: (ops: number[]) => number,
-): ComputeResult {
-  const errors: CapabilityError[] = [];
-
-  if (typeof operator !== 'string' || operator.length === 0) {
-    errors.push(
-      makeError(
-        'V105',
-        'Operator is missing or not a non-empty string.',
-        'operator',
-        `Provide one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!allowed.includes(operator)) {
-    errors.push(
-      makeError(
-        'V105',
-        `Operator '${operator}' is not supported.`,
-        'operator',
-        `Use one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!Array.isArray(operands) || operands.length === 0) {
-    errors.push(
-      makeError(
-        'V104',
-        'Operands array is empty or missing.',
-        'operands',
-        'Provide at least one integer operand.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  const clean: number[] = [];
-  for (let i = 0; i < operands.length; i++) {
-    const loc = `operands[${i}]`;
-    const err = validateInteger(operands[i], loc);
-    if (err) {
-      errors.push(err);
-    } else {
-      clean.push(operands[i] as number);
-    }
-  }
-
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-
-  const value = fn(clean);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    errors.push(
-      makeError(
-        'S303',
-        `Computed result ${value} violates the integer output schema.`,
-        'result',
-        'Ensure inputs are within safe integer range.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  return { ok: true, value };
-}
-
-/**
- * Error class used by division-era capabilities for invalid numeric input.
- * (Restored alongside the original API after an epoch-7 rewrite removed
- * safeCompute/makeError while production capabilities still imported them.)
- */
-export class SafeIntegerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SafeIntegerError';
-  }
-}
+];
