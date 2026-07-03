@@ -71,116 +71,109 @@ export class SearchGateway {
   }
 
   /**
-   * Strips/sanitizes malicious payloads or script tags from retrieved snippets to prevent injection.
+   * Strips/sanitizes malicious payloads or script tags from retrieved snippets to prevent exploits.
    */
-  public sanitizeText(text: string): string {
-    // Remove script tags, javascript: URIs, and HTML tag bounds
+  public sanitizeSnippet(text: string): string {
     return text
-      .replace(/<script[^>]*?>[\s\S]*?<\/script>/gi, '')
-      .replace(/javascript:/gi, '')
-      .replace(/[<>]/g, '');
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/on\w+=(["'])(.*?)\1/gi, '')
+      .replace(/javascript:/gi, '');
   }
 
   /**
-   * Evaluates rate limits on a per-task basis.
+   * Checks and decrements rate limits for a given task.
    */
-  public checkRateLimit(taskId: string): number {
+  public checkRateLimit(taskId: string): { remaining: number; allowed: boolean } {
     if (!this.rateLimits.has(taskId)) {
       this.rateLimits.set(taskId, this.maxLimit);
     }
     const remaining = this.rateLimits.get(taskId)!;
     if (remaining <= 0) {
-      throw new Error(`Rate limit exceeded for task ${taskId}`);
+      return { remaining: 0, allowed: false };
     }
-    this.rateLimits.set(taskId, remaining - 1);
-    return remaining - 1;
+    const nextRemaining = remaining - 1;
+    this.rateLimits.set(taskId, nextRemaining);
+    return { remaining: nextRemaining, allowed: true };
   }
 
   /**
-   * Mocked API gateway fetch that acts as the secure, host-side search client.
+   * Executes the search operation with strict rules.
    */
-  public async executeSearch(input: SearchInput, taskId: string): Promise<SearchOutput> {
-    if (!input.query || input.query.trim() === '') {
-      throw new Error('Search query cannot be empty');
-    }
-
+  public async performSearch(input: SearchInput, taskId: string): Promise<SearchOutput> {
     if (!this.validateQuery(input.query)) {
       throw new Error('Search query contains forbidden terms or violates safety policies');
     }
 
-    const remaining = this.checkRateLimit(taskId);
+    const rateCheck = this.checkRateLimit(taskId);
+    if (!rateCheck.allowed) {
+      throw new Error(`Rate limit exceeded for task: ${taskId}. Please back off.`);
+    }
+
     const provider = input.provider || 'google';
     const maxResults = Math.min(input.max_results || 5, 20);
 
-    // Simulated real-world external search integration satisfying specifications
-    const rawResults: SearchResultItem[] = [
-      {
-        title: `Search Result for ${input.query}`,
-        url: `https://www.example-search.com/q=${encodeURIComponent(input.query)}`,
-        snippet: `Here is a safe snippet about <script>alert("malicious")</script> ${input.query} details.`,
-        freshness_date: new Date().toISOString().split('T')[0]
-      },
-      {
-        title: 'Another Related Post',
-        url: 'https://blog.example.com/post-123',
-        snippet: 'A secondary result containing safe, useful context.',
-        freshness_date: '2023-10-01'
-      }
-    ];
+    // Simulated retrieval with sanitization
+    const rawSnippet = 'Check out <script>alert("xss")</script> this cool TypeScript search framework!';
+    const sanitizedSnippet = this.sanitizeSnippet(rawSnippet);
 
-    const sanitizedResults = rawResults.slice(0, maxResults).map(item => ({
-      title: this.sanitizeText(item.title),
-      url: item.url,
-      snippet: this.sanitizeText(item.snippet),
-      freshness_date: item.freshness_date
-    }));
+    const results: SearchResultItem[] = [];
+    for (let i = 0; i < maxResults; i++) {
+      results.push({
+        title: `Result ${i + 1} for ${input.query}`,
+        url: `https://example.com/search?q=${encodeURIComponent(input.query)}&index=${i}`,
+        snippet: sanitizedSnippet,
+        freshness_date: new Date().toISOString().split('T')[0]
+      });
+    }
 
     return {
-      results: sanitizedResults,
+      results,
       provider_used: provider,
-      truncated: rawResults.length > maxResults,
-      rate_limit_remaining: remaining
+      truncated: false,
+      rate_limit_remaining: rateCheck.remaining
     };
   }
 }
 
 export class ToolRegistry {
-  private gateway: SearchGateway;
-  private sandboxInaccessibleTools: Set<string> = new Set(['web_search']);
+  private searchGateway: SearchGateway;
 
-  constructor(gateway: SearchGateway) {
-    this.gateway = gateway;
+  constructor(searchGateway: SearchGateway) {
+    this.searchGateway = searchGateway;
   }
 
   /**
-   * Safe invocation interface. Ensures sandbox cannot invoke web_search directly.
+   * Invokes the web search tool securely from the controller host side.
    */
-  public async invokeTool(toolName: string, input: any, taskId: string, isSandbox: boolean = false): Promise<any> {
-    if (this.sandboxInaccessibleTools.has(toolName) && isSandbox) {
-      throw new Error(`Execution policy violation: ${toolName} is not accessible from inside the run_python sandbox.`);
+  public async invokeTool(
+    toolName: string,
+    input: SearchInput,
+    taskId: string,
+    isSandbox: boolean
+  ): Promise<SearchProvenanceEnvelope> {
+    if (toolName !== 'web_search') {
+      throw new Error(`Unknown tool: ${toolName}`);
     }
 
-    if (toolName === 'web_search') {
-      const searchOutput = await this.gateway.executeSearch(input, taskId);
-      
-      // Wrap in search-provenance envelope
-      const envelope: SearchProvenanceEnvelope = {
-        source: 'web_search',
-        timestamp: new Date().toISOString(),
-        query: input.query,
-        provider: searchOutput.provider_used,
-        data: searchOutput,
-        tainted: true // Always tainted to prevent execution of untrusted system instructions
-      };
-      return envelope;
+    if (isSandbox) {
+      throw new Error('Execution policy violation: web_search is not accessible from inside the run_python sandbox.');
     }
 
-    throw new Error(`Unknown tool: ${toolName}`);
+    const searchOutput = await this.searchGateway.performSearch(input, taskId);
+
+    return {
+      source: 'web_search',
+      timestamp: new Date().toISOString(),
+      query: input.query,
+      provider: searchOutput.provider_used,
+      data: searchOutput,
+      tainted: true
+    };
   }
 }
 
 /**
- * Persists search results to MemoryStore, ensuring taint-tracking is propagated.
+ * Persists the search results into memory_store, ensuring the permanent 'tainted' flag is set.
  */
 export function persistToMemory(store: MemoryStore, key: string, envelope: SearchProvenanceEnvelope): void {
   store.storedItems.push({
