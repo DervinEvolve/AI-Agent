@@ -1,188 +1,92 @@
-import { strict as assert } from 'node:assert';
+import * as artifactNoActiveContent9Module from "./artifact_no_active_content_9";
+import { BIOMETRIC_SENSITIVE_PERCEPTION_CONSTRAINT } from "./biometric_sensitive_perception_11";
 
-/**
- * Structured error model aligned with agent-capability-standard v1.0.0.
- * V1xx = validation errors, S3xx = schema errors.
- */
-export type CapabilityErrorCode =
-  | 'V101' // invalid input type
-  | 'V102' // non-finite numeric value
-  | 'V103' // non-integer numeric value
-  | 'V104' // empty / missing operand
-  | 'V105' // unsupported operator
-  | 'S301' // missing required field
-  | 'S302' // schema shape mismatch
-  | 'S303' // output schema violation
-  | 'S304'; // internal invariant violation
-
-export interface CapabilityError {
-  code: CapabilityErrorCode;
+export interface ConstraintSpec {
+  id: string;
   name: string;
-  message: string;
-  location: string;
-  suggestion: string;
+  status: string;
+  added_epoch?: number;
+  description: string;
+  implementation?: unknown;
+  [key: string]: unknown;
 }
 
-export const ERROR_NAMES: Record<CapabilityErrorCode, string> = {
-  V101: 'InvalidInputType',
-  V102: 'NonFiniteValue',
-  V103: 'NonIntegerValue',
-  V104: 'MissingOperand',
-  V105: 'UnsupportedOperator',
-  S301: 'MissingRequiredField',
-  S302: 'SchemaShapeMismatch',
-  S303: 'OutputSchemaViolation',
-  S304: 'InternalInvariantViolation',
+const ARTIFACT_NO_ACTIVE_CONTENT_9_FALLBACK: ConstraintSpec = {
+  id: "con_artifact_no_active_content_9",
+  name: "No active content in artifacts",
+  status: "active",
+  added_epoch: 9,
+  description:
+    "Artifacts produced by the agent must not contain active executable content such as scripts, event handlers, javascript: URLs, or equivalent active payloads."
 };
 
-export function makeError(
-  code: CapabilityErrorCode,
-  message: string,
-  location: string,
-  suggestion: string,
-): CapabilityError {
-  return { code, name: ERROR_NAMES[code], message, location, suggestion };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-/**
- * Type guard that rejects booleans BEFORE any numeric coercion, then
- * requires a finite integer. Returns a CapabilityError on failure.
- */
-export function validateInteger(
-  value: unknown,
-  location: string,
-): CapabilityError | null {
-  // Booleans must be rejected first: typeof true === 'boolean' but
-  // Number(true) === 1 would silently coerce.
-  if (typeof value === 'boolean') {
-    return makeError(
-      'V101',
-      `Expected an integer but received a boolean (${value}) at ${location}.`,
-      location,
-      'Provide a real integer value, not a boolean.',
-    );
-  }
-  if (typeof value !== 'number') {
-    return makeError(
-      'V101',
-      `Expected an integer but received ${typeof value} at ${location}.`,
-      location,
-      'Provide a numeric integer value.',
-    );
-  }
-  if (!Number.isFinite(value)) {
-    return makeError(
-      'V102',
-      `Value at ${location} is not finite (NaN or Infinity).`,
-      location,
-      'Provide a finite integer value.',
-    );
-  }
-  if (!Number.isInteger(value)) {
-    return makeError(
-      'V103',
-      `Value at ${location} is not an integer (${value}).`,
-      location,
-      'Provide an integer value (no fractional part).',
-    );
-  }
-  return null;
+function isConstraintSpec(value: unknown): value is ConstraintSpec {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.status === "string" &&
+    typeof value.description === "string"
+  );
 }
 
-export interface ComputeResult {
-  ok: boolean;
-  value?: number;
-  errors?: CapabilityError[];
-}
+function collectConstraintSpecs(moduleExports: Record<string, unknown>): ConstraintSpec[] {
+  const collected: ConstraintSpec[] = [];
 
-/**
- * Shared safe-compute entry point used by capability handlers.
- * Validates an operator string and an array of operands, then dispatches
- * to the provided arithmetic function.
- */
-export function safeCompute(
-  operator: unknown,
-  operands: unknown[],
-  allowed: string[],
-  fn: (ops: number[]) => number,
-): ComputeResult {
-  const errors: CapabilityError[] = [];
+  for (const value of Object.values(moduleExports)) {
+    if (isConstraintSpec(value)) {
+      collected.push(value);
+      continue;
+    }
 
-  if (typeof operator !== 'string' || operator.length === 0) {
-    errors.push(
-      makeError(
-        'V105',
-        'Operator is missing or not a non-empty string.',
-        'operator',
-        `Provide one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
+    if (Array.isArray(value)) {
+      collected.push(...value.filter(isConstraintSpec));
+      continue;
+    }
 
-  if (!allowed.includes(operator)) {
-    errors.push(
-      makeError(
-        'V105',
-        `Operator '${operator}' is not supported.`,
-        'operator',
-        `Use one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!Array.isArray(operands) || operands.length === 0) {
-    errors.push(
-      makeError(
-        'V104',
-        'Operands array is empty or missing.',
-        'operands',
-        'Provide at least one integer operand.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  const clean: number[] = [];
-  for (let i = 0; i < operands.length; i++) {
-    const loc = `operands[${i}]`;
-    const err = validateInteger(operands[i], loc);
-    if (err) {
-      errors.push(err);
-    } else {
-      clean.push(operands[i] as number);
+    if (isRecord(value) && Array.isArray(value.constraints)) {
+      collected.push(...value.constraints.filter(isConstraintSpec));
     }
   }
 
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-
-  const value = fn(clean);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    errors.push(
-      makeError(
-        'S303',
-        `Computed result ${value} violates the integer output schema.`,
-        'result',
-        'Ensure inputs are within safe integer range.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  return { ok: true, value };
+  return collected;
 }
 
-/**
- * Error class used by division-era capabilities for invalid numeric input.
- * (Restored alongside the original API after an epoch-7 rewrite removed
- * safeCompute/makeError while production capabilities still imported them.)
- */
-export class SafeIntegerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SafeIntegerError';
+function uniqueById(specs: readonly ConstraintSpec[]): ConstraintSpec[] {
+  const seen = new Set<string>();
+  const unique: ConstraintSpec[] = [];
+
+  for (const spec of specs) {
+    if (seen.has(spec.id)) {
+      continue;
+    }
+    seen.add(spec.id);
+    unique.push(spec);
   }
+
+  return unique;
 }
+
+const artifactNoActiveContent9Constraints = collectConstraintSpecs(artifactNoActiveContent9Module as Record<string, unknown>);
+const hasArtifactNoActiveContent9 = artifactNoActiveContent9Constraints.some((constraint) =>
+  constraint.id.includes("artifact_no_active_content_9")
+);
+
+export const constraints: readonly ConstraintSpec[] = uniqueById([
+  ...(hasArtifactNoActiveContent9 ? artifactNoActiveContent9Constraints : [ARTIFACT_NO_ACTIVE_CONTENT_9_FALLBACK]),
+  BIOMETRIC_SENSITIVE_PERCEPTION_CONSTRAINT
+]);
+
+export const CONSTRAINTS = constraints;
+export const allConstraints = constraints;
+export const constraintRegistry = { constraints } as const;
+
+export function getConstraintById(id: string): ConstraintSpec | undefined {
+  return constraints.find((constraint) => constraint.id === id);
+}
+
+export default constraints;
