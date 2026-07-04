@@ -1,4 +1,4 @@
-export interface Constraint {
+export interface Constraint { 
   id: string;
   description: string;
 }
@@ -22,42 +22,44 @@ export interface ActionApprovalContext {
   hasUserConfirmation: boolean;
   confirmedOrigin?: string;
   confirmedActionType?: string;
-  confirmedTarget?: string;
 }
 
-/**
- * Evaluates whether an API client action is policy-approved or must fail closed.
- * Returns true if the action is safe to execute, or throws/returns false if it is blocked.
- */
-export function validateAPIClientRequest(request: APIRequest, context: ActionApprovalContext): { allowed: boolean; reason?: string } {
-  const method = (request.method || 'GET').toUpperCase();
-  const isStateChanging = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
+export interface ValidationResult {
+  allowed: boolean;
+  reason?: string;
+}
 
-  // Check for GraphQL mutations inside POST body
+export function validateAPIClientRequest(req: APIRequest, context: ActionApprovalContext): ValidationResult {
+  const method = req.method.toUpperCase();
+  
+  // Check if body is a GraphQL mutation
   let isGraphQLMutation = false;
-  if (method === 'POST' && request.body) {
-    let queryStr = '';
-    if (typeof request.body === 'string') {
-      queryStr = request.body;
-    } else if (typeof request.body === 'object' && request.body !== null) {
-      queryStr = request.body.query || '';
-    }
-    if (typeof queryStr === 'string' && /\bmutation\b/i.test(queryStr)) {
+  if (req.body) {
+    const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    if (/\\bmutation\\b/i.test(bodyStr)) {
       isGraphQLMutation = true;
     }
   }
 
-  if (isStateChanging || isGraphQLMutation) {
-    if (!context.isInteractive) {
-      return { allowed: false, reason: "policy_blocked" };
-    }
-    if (!context.hasUserConfirmation) {
-      return { allowed: false, reason: "requires_explicit_user_confirmation" };
-    }
+  const isStateChanging = ["POST", "PUT", "DELETE", "PATCH"].includes(method) || isGraphQLMutation;
 
-    // Verify the confirmation is bound correctly to the target and action
-    if (context.confirmedTarget && !request.url.includes(context.confirmedTarget)) {
-      return { allowed: false, reason: "confirmation_target_mismatch" };
+  if (!isStateChanging) {
+    return { allowed: true };
+  }
+
+  if (!context.isInteractive) {
+    return { allowed: false, reason: "policy_blocked" };
+  }
+
+  if (!context.hasUserConfirmation) {
+    return { allowed: false, reason: "requires_explicit_user_confirmation" };
+  }
+
+  // Verify origin and action type if specified in confirmation
+  if (context.confirmedOrigin) {
+    const urlOrigin = new URL(req.url).origin;
+    if (context.confirmedOrigin !== urlOrigin) {
+      return { allowed: false, reason: "requires_explicit_user_confirmation" };
     }
   }
 
