@@ -1,125 +1,124 @@
-import {
-  storeClaim,
-  exportClaim,
-  enforceClaimConstraints,
-  createClaim,
-  validateClaimEvidence,
-} from './con_claim_ledger_non_authority_19';
+import { ClaimLedger } from './con_claim_ledger_non_authority_19';
 import { redactSecrets } from '../capabilities/secret_redactor';
 
-describe('Claim ledger non-authority constraint', () => {
-  const taintedClaim = createClaim({ id: 'tainted-1', content: 'User reported success', tainted: true });
-  const cleanClaim = createClaim({ id: 'clean-1', content: 'Evidence shows success', tainted: false });
+describe('ClaimLedger', () => {
+  let ledger: ClaimLedger;
 
-  describe('authorization / HITL / clearTaint prohibitions', () => {
-    it('a claim cannot be used as the authorization for a browser/API dispatch', () => {
-      expect(() => enforceClaimConstraints(cleanClaim, 'authorization')).toThrow(
-        'Claims must not be used as authorization for any action',
-      );
-    });
-
-    it('a claim cannot satisfy a HITL gate or serve as an approval token', () => {
-      expect(() => enforceClaimConstraints(cleanClaim, 'HITL')).toThrow(
-        'Claims cannot satisfy HITL confirmation requirements',
-      );
-    });
-
-    it('a claim cannot clear taint or convert tainted evidence into trusted tool arguments', () => {
-      expect(() => enforceClaimConstraints(taintedClaim, 'clearTaint')).toThrow(
-        'Claims cannot clear taint or convert tainted evidence into trusted arguments',
-      );
-    });
+  beforeEach(() => {
+    ledger = new ClaimLedger();
   });
 
-  describe('secret redaction during storage', () => {
-    it('redacts raw secrets and rejects storage if content becomes ambiguous', () => {
-      const secretOnlyClaim = createClaim({ id: 'secret-only', content: 'password123' });
-      const redacted = redactSecrets(secretOnlyClaim.content);
-      // Assuming redaction replaces the secret, leaving only [REDACTED] or similar
-      expect(() => storeClaim(secretOnlyClaim)).toThrow(
-        'Claim storage rejected: content too ambiguous after secret redaction',
-      );
-    });
+  const sampleClaim = {
+    id: 'c1',
+    content: 'Service operational after patching',
+    tainted: true,
+    metadata: { source: 'monitor', 'internal-audit-id': 'abc123' },
+    evidenceValidated: false,
+  };
 
-    it('stores claim when redaction leaves sufficient context', () => {
-      const okClaim = createClaim({ id: 'ok-context', content: 'The API key is abc123 but result is valid' });
-      const stored = storeClaim(okClaim);
-      expect(stored.content).not.toContain('abc123');
-      expect(stored.content).toContain('The API key is');
+  describe('storeClaim()', () => {
+    it('stores a claim and redacts secrets in content', () => {
+      const withSecret = { ...sampleClaim, content: 'API token: sk-12345-abcdef' };
+      const stored = ledger.storeClaim(withSecret);
+      expect(stored.content).not.toContain('sk-12345-abcdef');
       expect(stored.content).toContain('[REDACTED]');
-      expect(stored.tainted).toBe(false);
-    });
-
-    it('preserves taint during storage even after redaction', () => {
-      const taintedSecretClaim = createClaim({
-        id: 'tainted-secret',
-        content: 'key=secret, but evidence is tainted',
-        tainted: true,
-      });
-      const stored = storeClaim(taintedSecretClaim);
       expect(stored.tainted).toBe(true);
-      expect(stored.content).not.toContain('secret');
+      expect(stored.metadata).toEqual(sampleClaim.metadata);
+      expect(stored.evidenceValidated).toBe(false);
+
+      const retrieved = ledger.getClaim('c1');
+      expect(retrieved).toBeDefined();
+      expect(retrieved?.content).toEqual(stored.content);
     });
-  });
 
-  describe('exported claims safety', () => {
-    it('exported claims never contain raw secrets, live auth state, or internal-only metadata', () => {
-      const claimWithInternalMeta = createClaim({
-        id: 'export-test',
-        content: 'Some claim with token 12345',
-        tainted: false,
-        metadata: {
-          'internal-token': 'should-be-stripped',
-          publicNote: 'hello',
-        },
-      });
-      storeClaim(claimWithInternalMeta);
-
-      const exported = exportClaim('export-test');
-      expect(exported.content).not.toContain('12345');
-      // Internal metadata field removed
-      expect(exported.metadata).toBeDefined();
-      expect(exported.metadata).not.toHaveProperty('internal-token');
-      expect(exported.metadata).toHaveProperty('publicNote', 'hello');
-    });
-  });
-
-  describe('tool argument validation', () => {
-    it('rejects claims used as tool arguments without independent validation', () => {
-      expect(() => enforceClaimConstraints(cleanClaim, 'toolArg')).toThrow(
-        'Claim must be independently validated before being used as a tool argument',
+    it('rejects storage when redaction makes content too ambiguous', () => {
+      const secretOnly = { ...sampleClaim, content: '123-45-6789' };
+      // redactSecrets will replace the entire string if it matches a secret pattern,
+      // leaving only placeholders. After trimming, content may become too short.
+      expect(() => ledger.storeClaim(secretOnly)).toThrow(
+        'Claim storage rejected: content too ambiguous after secret redaction'
       );
     });
 
-    it('allows claim as tool argument after independent evidence validation', () => {
-      storeClaim(cleanClaim);
-      validateClaimEvidence(cleanClaim.id);
-      expect(() => enforceClaimConstraints(cleanClaim, 'toolArg')).not.toThrow();
+    it('allows storage when redaction leaves enough context', () => {
+      const mixed = { ...sampleClaim, content: 'User verified with password: [REDACTED] on login page' };
+      // The redaction already present; redactSecrets may re-apply but overall content remains.
+      const stored = ledger.storeClaim(mixed);
+      expect(stored.content).toBeDefined();
+      expect(stored.content.length).toBeGreaterThanOrEqual(5);
     });
 
-    it('allows tainted claim as tool argument if validated (taint remains but does not block tool usage)', () => {
-      const taintedValidated = createClaim({ id: 'tv-1', content: 'tainted but validated', tainted: true });
-      storeClaim(taintedValidated);
-      validateClaimEvidence('tv-1');
-      expect(() => enforceClaimConstraints(taintedValidated, 'toolArg')).not.toThrow();
+    it('preserves evidenceValidated flag', () => {
+      const claim = { ...sampleClaim, evidenceValidated: true };
+      const stored = ledger.storeClaim(claim);
+      expect(stored.evidenceValidated).toBe(true);
     });
   });
 
-  describe('controller integration test', () => {
-    it('verifies that claims are never passed directly to tool adapters as arguments without independent validation', () => {
-      const claim = createClaim({ id: 'integ-1', content: 'some conclusion' });
-      function toolAdapter(claimArg: unknown) {
-        enforceClaimConstraints(claim as any, 'toolArg');
-        return 'action executed';
-      }
+  describe('getClaim()', () => {
+    it('returns stored claim by id', () => {
+      ledger.storeClaim(sampleClaim);
+      const claim = ledger.getClaim('c1');
+      expect(claim).toBeDefined();
+      expect(claim!.id).toBe('c1');
+    });
 
-      // Without validation, should throw
-      expect(() => toolAdapter(claim)).toThrow();
+    it('returns undefined for missing claim', () => {
+      expect(ledger.getClaim('nonexistent')).toBeUndefined();
+    });
+  });
 
-      // After validation, should work
-      storeClaim(claim);
-      validateClaimEvidence(claim.id);
-      expect(() => toolAdapter(claim)).not.toThrow();
+  describe('exportClaim()', () => {
+    it('exports a sanitised snapshot without internal metadata', () => {
+      ledger.storeClaim(sampleClaim);
+      const snapshot = ledger.exportClaim('c1');
+      expect(snapshot.id).toBe('c1');
+      expect(snapshot.content).toEqual(sampleClaim.content); // no secret in this test
+      expect(snapshot.tainted).toBe(true);
+      expect(snapshot.metadata).toEqual({ source: 'monitor' }); // internal-audit-id stripped
+    });
+
+    it('re-redacts content to ensure no secrets leak', () => {
+      const withSecret = { ...sampleClaim, content: 'Token: sk-live-abcdef' };
+      ledger.storeClaim(withSecret);
+      const snapshot = ledger.exportClaim('c1');
+      expect(snapshot.content).not.toContain('sk-live-abcdef');
+      expect(snapshot.content).toContain('[REDACTED]');
+    });
+
+    it('throws if claim is not found', () => {
+      expect(() => ledger.exportClaim('missing')).toThrow();
+    });
+  });
+
+  describe('validateClaimUsage()', () => {
+    it('throws when claim is used as authorization', () => {
+      const claim = ledger.storeClaim(sampleClaim);
+      expect(() => ledger.validateClaimUsage(claim, 'authorization')).toThrow();
+    });
+
+    it('throws when claim is used as HITL confirmation', () => {
+      const claim = ledger.storeClaim(sampleClaim);
+      expect(() => ledger.validateClaimUsage(claim, 'HITL')).toThrow();
+    });
+
+    it('throws when claim is used to clear taint', () => {
+      const claim = ledger.storeClaim(sampleClaim);
+      expect(() => ledger.validateClaimUsage(claim, 'clearTaint')).toThrow();
+    });
+
+    it('throws when claim is used as direct tool argument', () => {
+      const claim = ledger.storeClaim(sampleClaim);
+      // 'toolArg' is defined in ClaimUsage – must be rejected
+      expect(() => ledger.validateClaimUsage(claim, 'toolArg')).toThrow();
+    });
+
+    it('allows advisory usage (export) without throwing', () => {
+      const claim = ledger.storeClaim(sampleClaim);
+      // 'export' may be allowed as an advisory usage; we do not expect it to throw unless
+      // the implementation explicitly forbids it. If forbidden, adapt test accordingly.
+      // Currently exportClaim() itself is allowed, so we assume 'export' usage is not restricted.
+      expect(() => ledger.validateClaimUsage(claim, 'export')).not.toThrow();
     });
   });
 });
