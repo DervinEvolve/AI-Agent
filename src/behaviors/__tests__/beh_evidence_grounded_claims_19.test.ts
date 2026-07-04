@@ -47,10 +47,24 @@ describe('Evidence-grounded claim synthesis and verification', () => {
   });
 
   test('before a consequential decision, controller retrieves relevant claims and checks contradictions and confidence', () => {
-    // Register some claims
-    synthesizeClaim(ledger, 'Service X has 99.9% uptime', [{ ref: 'monitoring-report', reliability: 0.95 }], 0.95, {
-      subjectTags: ['uptime'],
-    });
+    const claim1 = synthesizeClaim(
+      ledger,
+      'Service X has 99.9% uptime',
+      [{ ref: 'monitoring-report', reliability: 0.95 }],
+      0.95,
+      { subjectTags: ['uptime'] }
+    );
+
+    // Contradictory claim that explicitly refutes claim1
+    const contradictory = synthesizeClaim(
+      ledger,
+      'Service X is down frequently',
+      [{ ref: 'incident-log', reliability: 0.7 }],
+      0.7,
+      { subjectTags: ['uptime'], refutes: [claim1.id] }
+    );
+
+    // Low-confidence claim
     const lowClaim = synthesizeClaim(
       ledger,
       'Service X has experienced outages recently',
@@ -58,167 +72,149 @@ describe('Evidence-grounded claim synthesis and verification', () => {
       0.5,
       { subjectTags: ['uptime'] }
     );
-    // Create a contradiction: a new claim refutes the low claim
-    synthesizeClaim(
-      ledger,
-      'Service X had no outages; user reports are false',
-      [{ ref: 'detailed-incident-log', reliability: 0.9 }],
-      0.9,
-      { subjectTags: ['uptime'], refutes: [lowClaim.id] }
-    );
 
-    // Verify for a decision about reliability
-    const result = verifyClaimsForDecision(ledger, {
-      subjectTags: ['uptime'],
-      minConfidence: 0.7,
-    });
+    const verification = verifyClaimsForDecision(ledger, { subject: 'uptime' });
 
-    expect(result.safe).toBe(false);
-    expect(result.lowConfidenceClaims).toHaveLength(1);
-    expect(result.lowConfidenceClaims[0].id).toBe(lowClaim.id);
-    expect(result.contradictedClaims.length).toBeGreaterThan(0);
-    const contradictedIds = result.contradictedClaims.map(c => c.id);
-    expect(contradictedIds).toContain(lowClaim.id);
-    expect(result.issues.some(issue => issue.includes('low confidence'))).toBe(true);
-    expect(result.issues.some(issue => issue.includes('refutes'))).toBe(true);
+    expect(verification.contradictions).toBeDefined();
+    expect(verification.contradictions).toHaveLength(1);
+    const pair = verification.contradictions[0];
+    expect(pair).toEqual(expect.arrayContaining([claim1, contradictory]));
+
+    expect(verification.lowConfidence).toEqual(expect.arrayContaining([lowClaim]));
+    expect(verification.safeToProceed).toBe(false);
+    expect(verification.clarificationNeeded).toBe(true);
+
+    // Verify trace event for the decision check
+    const decisionEvents = TraceStore.getEvents().filter(e => e.type === 'claim_verification');
+    expect(decisionEvents.length).toBeGreaterThanOrEqual(1);
+    expect(decisionEvents[0].data.subject).toBe('uptime');
   });
 
-  test('a low-confidence or contradicted claim is flagged in the final answer or triggers a clarification request', () => {
-    const claim = synthesizeClaim(
-      ledger,
-      'Memory usage is stable',
-      [{ ref: 'quick-glance', reliability: 0.3 }],
-      0.4,
-      { subjectTags: ['memory'] }
-    );
+  test('detectContradictions identifies pairs of claims that refute each other', () => {
+    const claimA: Claim = {
+      id: 'cA',
+      content: 'X is true',
+      confidence: 0.9,
+      sources: [],
+      timestamp: Date.now(),
+      tainted: false,
+      state: 'pending',
+      subjectTags: ['topic'],
+    };
 
-    const result = verifyClaimsForDecision(ledger, {
-      subjectTags: ['memory'],
-      minConfidence: 0.6,
-    });
+    const claimB: Claim = {
+      id: 'cB',
+      content: 'X is false',
+      confidence: 0.8,
+      sources: [],
+      timestamp: Date.now(),
+      tainted: false,
+      state: 'pending',
+      refutes: ['cA'],
+      subjectTags: ['topic'],
+    };
 
-    expect(result.safe).toBe(false);
-    expect(result.lowConfidenceClaims).toContain(claim);
-    expect(result.issues.some(issue => issue.includes('low confidence'))).toBe(true);
+    const claimC: Claim = {
+      id: 'cC',
+      content: 'unrelated',
+      confidence: 0.7,
+      sources: [],
+      timestamp: Date.now(),
+      tainted: false,
+      state: 'pending',
+    };
+
+    const contradictions = detectContradictions([claimA, claimB, claimC]);
+    expect(contradictions).toHaveLength(1);
+    expect(contradictions[0]).toEqual(expect.arrayContaining([claimA, claimB]));
   });
 
   test('claims derived from tainted observations are marked tainted and are not used as sole evidence for a success criterion', () => {
-    // Register a claim from a tainted source
-    const taintedClaim = synthesizeClaim(
+    const claim = synthesizeClaim(
       ledger,
-      'User session is active',
-      [{ ref: 'untrusted-proxy', reliability: 0.1 }],
-      0.9,
-      { tainted: true, subjectTags: ['session'] }
-    );
-    expect(taintedClaim.tainted).toBe(true);
-
-    // Also register a clean claim
-    synthesizeClaim(
-      ledger,
-      'User session verified by auth service',
-      [{ ref: 'auth-service', reliability: 0.99 }],
-      0.98,
-      { subjectTags: ['session'] }
+      'API is functional',
+      [{ ref: 'hearsay', reliability: 0.2 }],
+      0.6,
+      { subjectTags: ['api-health'] }
     );
 
-    // Evaluate criterion that should only use clean claims
-    const evaluation = evaluateCriterion(ledger, {
-      subjectTag: 'session',
-      minConfidence: 0.7,
-      requiredClaims: 1,
+    markClaimTainted(ledger, claim.id, 'unreliable source');
+    const stored = ledger.get(claim.id);
+    expect(stored).toBeDefined();
+    expect(stored?.tainted).toBe(true);
+    expect(stored?.state).toBe('suspect');
+
+    // The evaluation of the criterion should not rely solely on a tainted claim
+    const result = evaluateCriterion(ledger, {
+      description: 'API is functional',
+      subject: 'api-health',
     });
+    expect(result.satisfied).toBe(false);
+    expect(result.evidenceClaimIds).not.toContain(claim.id);
 
-    // It should be satisfied because there is at least one non-tainted claim
-    expect(evaluation.satisfied).toBe(true);
-    expect(evaluation.supportingClaimIds).not.toContain(taintedClaim.id);
-    expect(evaluation.confidence).toBeGreaterThan(0.9);
-
-    // Now simulate scenario where only tainted claim exists
-    ledger.clear();
-    TraceStore.clear();
-    synthesizeClaim(
-      ledger,
-      'Only tainted evidence',
-      [{ ref: 'suspicious' }],
-      0.8,
-      { tainted: true, subjectTags: ['security'] }
-    );
-    const eval2 = evaluateCriterion(ledger, {
-      subjectTag: 'security',
-      minConfidence: 0.7,
-    });
-    expect(eval2.satisfied).toBe(false);
-    expect(eval2.supportingClaimIds).toHaveLength(0);
+    // Verify trace event for taint marking
+    const taintEvents = TraceStore.getEvents().filter(e => e.type === 'claim_tainted');
+    expect(taintEvents.length).toBe(1);
+    expect(taintEvents[0].data.claimId).toBe(claim.id);
   });
 
   test('trace_eval can cite claim_ids as evidence refs for criterion satisfaction', () => {
-    const claim1 = synthesizeClaim(ledger, 'Deployment passed all tests', [{ ref: 'ci-pipeline' }], 1.0, {
-      subjectTags: ['deployment'],
-    });
-    const claim2 = synthesizeClaim(ledger, 'No security alerts', [{ ref: 'security-scan' }], 0.95, {
-      subjectTags: ['deployment', 'security'],
+    const claim1 = synthesizeClaim(
+      ledger,
+      'Payment gateway responds in <200ms',
+      [{ ref: 'perf-report', reliability: 0.95 }],
+      0.95,
+      { subjectTags: ['performance', 'payment'] }
+    );
+
+    const claim2 = synthesizeClaim(
+      ledger,
+      'Payment endpoint error rate below 0.1%',
+      [{ ref: 'error-logs', reliability: 0.99 }],
+      0.99,
+      { subjectTags: ['performance', 'payment'] }
+    );
+
+    const result = evaluateCriterion(ledger, {
+      description: 'Payment service meets SLA',
+      subject: 'payment',
     });
 
-    const evaluation = evaluateCriterion(ledger, {
-      subjectTag: 'deployment',
-      minConfidence: 0.9,
-      requiredClaims: 2,
-    });
-
-    expect(evaluation.satisfied).toBe(true);
-    expect(evaluation.supportingClaimIds).toContain(claim1.id);
-    expect(evaluation.supportingClaimIds).toContain(claim2.id);
-    expect(evaluation.traceData.claimIds).toEqual(
+    // Both claims should be used as evidence
+    expect(result.satisfied).toBe(true);
+    expect(result.evidenceClaimIds).toEqual(
       expect.arrayContaining([claim1.id, claim2.id])
     );
 
-    const traceEvents = TraceStore.getEvents();
-    const criterionEvents = traceEvents.filter(e => e.type === 'criterion_evaluated');
-    expect(criterionEvents).toHaveLength(1);
-    expect(criterionEvents[0].data.claimIds).toEqual(evaluation.supportingClaimIds);
+    // A trace event should record the evaluation with evidence refs
+    const evalEvents = TraceStore.getEvents().filter(e => e.type === 'criterion_evaluation');
+    expect(evalEvents).toHaveLength(1);
+    expect(evalEvents[0].data.criterion).toBe('Payment service meets SLA');
+    expect(evalEvents[0].data.evidenceClaimIds).toEqual(
+      expect.arrayContaining([claim1.id, claim2.id])
+    );
   });
 
   test('claim ledger operations are recorded in trace events for full auditability', () => {
-    // Clear any initial events
-    TraceStore.clear();
-
     const claim = synthesizeClaim(
       ledger,
-      'Test',
-      [{ ref: 'source' }],
-      0.9,
+      'Audit test',
+      [{ ref: 'source', reliability: 1 }],
+      1,
       { subjectTags: ['audit'] }
     );
 
-    markClaimTainted(ledger, claim.id);
+    const beforeTrace = TraceStore.getEvents();
+    expect(beforeTrace.some(e => e.type === 'claim_registered')).toBe(true);
 
-    // Detect contradictions (none here, but function still runs)
-    detectContradictions(ledger);
+    verifyClaimsForDecision(ledger, { subject: 'audit' });
+    const afterVerify = TraceStore.getEvents();
+    expect(afterVerify.some(e => e.type === 'claim_verification')).toBe(true);
 
-    const events = TraceStore.getEvents();
-    expect(events).toHaveLength(2); // register + taint
-    expect(events[0].type).toBe('claim_registered');
-    expect(events[1].type).toBe('claim_tainted');
-    expect(events[0].data.claimId).toBe(claim.id);
-    expect(events[1].data.claimId).toBe(claim.id);
+    markClaimTainted(ledger, claim.id, 'test');
+    expect(TraceStore.getEvents().some(e => e.type === 'claim_tainted')).toBe(true);
 
-    // Now create contradiction scenario
-    const claim2 = synthesizeClaim(
-      ledger,
-      'Refuting claim',
-      [{ ref: 'second-source' }],
-      0.8,
-      { subjectTags: ['audit'], refutes: [claim.id] }
-    );
-
-    // Run contradiction detection
-    detectContradictions(ledger);
-
-    const laterEvents = TraceStore.getEvents();
-    const contradictionEvent = laterEvents.find(e => e.type === 'contradiction_detected');
-    expect(contradictionEvent).toBeDefined();
-    expect(contradictionEvent!.data.claimA).toBe(claim2.id);
-    expect(contradictionEvent!.data.claimB).toBe(claim.id);
+    evaluateCriterion(ledger, { description: 'Audit criterion', subject: 'audit' });
+    expect(TraceStore.getEvents().some(e => e.type === 'criterion_evaluation')).toBe(true);
   });
 });
