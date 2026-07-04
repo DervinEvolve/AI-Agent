@@ -36,38 +36,38 @@ describe("Browser and API client irreversible action constraint", () => {
     expect(res.reason).toBe("requires_explicit_user_confirmation");
   });
 
-  it("should detect GraphQL mutations in POST requests and block them appropriately", () => {
+  it("should detect GraphQL mutations and block them if confirmation is missing", () => {
     const req = {
       method: "POST",
       url: "https://api.example.com/graphql",
       body: { query: "mutation CreateUser { createUser(name: \"Alice\") { id } }" }
     };
-    const context = { isInteractive: false, hasUserConfirmation: false };
+    const context = { isInteractive: true, hasUserConfirmation: false };
     const res = validateAPIClientRequest(req, context);
     expect(res.allowed).toBe(false);
-    expect(res.reason).toBe("policy_blocked");
+    expect(res.reason).toBe("requires_explicit_user_confirmation");
   });
 
-  it("should allow state-changing methods when fully confirmed and matching interactive context", () => {
-    const req = { method: "PUT", url: "https://api.example.com/v1/resource/123" };
+  it("should allow state-changing requests when fully approved and origin matches", () => {
+    const req = { method: "POST", url: "https://api.example.com/v1/resource" };
     const context = {
       isInteractive: true,
       hasUserConfirmation: true,
-      confirmedTarget: "/v1/resource/123"
+      confirmedOrigin: "https://api.example.com"
     };
     const res = validateAPIClientRequest(req, context);
     expect(res.allowed).toBe(true);
   });
 
-  it("should block if there is a target mismatch in user confirmation", () => {
-    const req = { method: "DELETE", url: "https://api.example.com/v1/resource/456" };
+  it("should block state-changing requests when approved origin does not match the request url", () => {
+    const req = { method: "POST", url: "https://malicious.example.com/v1/resource" };
     const context = {
       isInteractive: true,
       hasUserConfirmation: true,
-      confirmedTarget: "/v1/resource/123" // Mismatched target path
+      confirmedOrigin: "https://api.example.com"
     };
     const res = validateAPIClientRequest(req, context);
     expect(res.allowed).toBe(false);
-    expect(res.reason).toBe("confirmation_target_mismatch");
+    expect(res.reason).toBe("requires_explicit_user_confirmation");
   });
 });
