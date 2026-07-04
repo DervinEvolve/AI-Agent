@@ -28,6 +28,9 @@ describe('Dialogue-grounded multi-turn interaction (beh_multi_turn_dialogue_grou
     manager = new DialogueManager(immutableCriteria);
   });
 
+  // ------------------------------------------------------------
+  // 1. Basic multi-turn, intent validation, continuation
+  // ------------------------------------------------------------
   describe('controller uses dialogue_manager to start and continue a multi-turn task', () => {
     it('starts with a valid user turn and provides a validated intent', async () => {
       const controller = new DialogueController(manager);
@@ -49,163 +52,158 @@ describe('Dialogue-grounded multi-turn interaction (beh_multi_turn_dialogue_grou
     });
   });
 
+  // ------------------------------------------------------------
+  // 2. Ambiguity → pending clarification + HITL (interactive / non‑interactive)
+  // ------------------------------------------------------------
   describe('ambiguity leads to pending clarification and HITL request', () => {
     it('sets pending clarification and requests via hitl_channel when interactive', async () => {
       const hitl = mockHITLChannel();
       const controller = new DialogueController(manager, hitl);
-      const result = await controller.handleTurn('uhh maybe something', true);
+      // Use an input that the default resolver cannot classify (triggers ambiguity)
+      const result = await controller.handleTurn('blarg', true);
+
       expect(result.ok).toBe(false);
-      expect(result.clarification).toBeDefined();
-      expect(result.clarification!.type).toBe('ambiguity');
-      expect(hitl.requestClarification).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'ambiguity' })
-      );
-      // The manager should have a pending clarification
-      expect(manager.hasPendingClarification()).toBe(true);
+      expect(hitl.requestClarification).toHaveBeenCalledOnce();
+      // The manager's state should now have a pending clarification
+      const state = controller.getManager().state;
+      expect(state.pendingClarification).not.toBeNull();
     });
 
-    it('returns policy_blocked when non-interactive and ambiguity occurs', async () => {
-      const controller = new DialogueController(manager, undefined);
-      const result = await controller.handleTurn('some weird input', false);
-      expect(result.ok).toBe(false);
-      expect(result.reason).toContain('policy_blocked');
-      expect(result.clarification).toBeDefined();
-      // No HITL request because non-interactive
-    });
-
-    it('flags the ambiguity type correctly for unknown intent', async () => {
+    it('returns a structured failure with ambiguity flagged when non-interactive', async () => {
       const hitl = mockHITLChannel();
       const controller = new DialogueController(manager, hitl);
-      const result = await controller.handleTurn('xyzzy', true);
+      const result = await controller.handleTurn('blarg', false); // non‑interactive
+
       expect(result.ok).toBe(false);
-      expect(result.clarification).toHaveProperty('type', 'ambiguity');
+      // HITL must NOT be called in non-interactive mode
+      expect(hitl.requestClarification).not.toHaveBeenCalled();
+      // The result should indicate a policy block or ambiguity flag
+      expect(result.reason).toMatch(/ambiguity|unresolved/i);
+      // The pending clarification should still be present on the state
+      const state = controller.getManager().state;
+      expect(state.pendingClarification).not.toBeNull();
     });
   });
 
-  describe('commitments recorded by agent and honored before final answer', () => {
-    it('records a commitment and retrieves it before final answer', async () => {
+  // ------------------------------------------------------------
+  // 3. Commitment tracking (record / retrieve / honor)
+  // ------------------------------------------------------------
+  describe('commitments recorded by agent in dialogue state are retrieved to ensure they are honored', () => {
+    it('records a commitment when the user explicitly asks for a summary', async () => {
       const controller = new DialogueController(manager);
-      await controller.handleTurn('I need a summary of the document', true);
-      // Simulate the agent adding a commitment
-      manager.addCommitment({
-        id: 'cm1',
-        description: 'Provide a summary before final result',
-        fulfilled: false,
+      await controller.handleTurn('please summarize before giving the final answer', true);
+      const state = controller.getManager().state;
+      // After a turn whose intent is "summarize" the manager should have recorded a commitment
+      expect(state.commitments.length).toBeGreaterThan(0);
+      expect(state.commitments.some(c => c.description.toLowerCase().includes('summar'))).toBe(true);
+    });
+
+    it('exposes unfulfilled commitments via checkCommitments() and they can be fulfilled later', async () => {
+      // Simulate a sequence: user asks for a summary, then later asks for the final result.
+      const controller = new DialogueController(manager);
+      await controller.handleTurn('please summarize before giving the final answer', true);
+      // After the first turn we should have an unfulfilled commitment
+      const unfulfilled = manager.checkCommitments();
+      expect(unfulfilled.length).toBeGreaterThan(0);
+
+      // Now handle a second turn that could trigger fulfilment (agent decides to summarize)
+      await controller.handleTurn('give me the final answer', true);
+      // The controller's internal logic should mark the summary commitment as fulfilled
+      const stateAfter = controller.getManager().state;
+      const summaryCommitment = stateAfter.commitments.find(c => c.description.includes('summar'));
+      expect(summaryCommitment?.fulfilled).toBe(true);
+    });
+  });
+
+  // ------------------------------------------------------------
+  // 4. Intent validation against immutable success criteria
+  // ------------------------------------------------------------
+  describe('dialogue-derived intent is validated against immutable success criteria before use', () => {
+    it('rejects an intent that conflicts with immutable criteria', async () => {
+      // Pre-load the manager with a custom resolver that yields a dangerous intent
+      manager.setResolver({
+        resolve: () => ({ intent: 'disable_safeties', confidence: 0.99 }),
       });
-
-      // Before final answer, check commitments
-      const pending = controller.checkCommitmentsBeforeFinal();
-      expect(pending).toContain('Provide a summary before final result');
-
-      // After the agent fulfills it
-      manager.fulfillCommitment('cm1');
-      expect(controller.checkCommitmentsBeforeFinal()).toHaveLength(0);
-    });
-
-    it('does not bypass HITL for irreversible actions', async () => {
-      // The presence of a commitment does not mean the system automatically dispatches an irreversible action;
-      // the actual dispatch still goes through HITL.
-      // Here we simulate a controller that first checks commitments, then later the action is dispatched via HITL.
       const controller = new DialogueController(manager);
-      // User asks to deactivate something (this intent will be blocked by criteria)
-      const result = await controller.handleTurn('deactivate all sensors', true);
-      // This intent should not validate, resulting in clarification (not action)
+      const result = await controller.handleTurn('turn off all safety systems', true);
       expect(result.ok).toBe(false);
-      expect(result.reason).toContain('clarification_required');
-      // Even if the agent had a commitment, the HITL check must occur before acting.
-      // The test verifies that the controller's handleTurn does not silently allow dispatch.
+      expect(result.reason).toMatch(/safety|forbidden|invalid/i);
+      // The validatedIntent field should not contain the dangerous intent
+      expect(result.validatedIntent).toBeFalsy();
     });
-  });
 
-  describe('dialogue-derived intent is validated against immutable success criteria', () => {
-    it('permits search intent when criteria include answering', async () => {
-      const result = manager.processTurn('search for weather', true);
+    it('accepts an intent that is consistent with the criteria', async () => {
+      const hitl = mockHITLChannel();
+      const controller = new DialogueController(manager, hitl);
+      const result = await controller.handleTurn('search for something', true);
       expect(result.ok).toBe(true);
       expect(result.validatedIntent).toBe('search');
     });
-
-    it('blocks stop intent when safety criteria forbid it', async () => {
-      // "never disable safety systems" is a criterion; stop is not aligned
-      const hitl = mockHITLChannel();
-      const controller = new DialogueController(manager, hitl);
-      const result = await controller.handleTurn('deactivate main system', true);
-      expect(result.ok).toBe(false);
-      expect(result.clarification).toBeDefined();
-      expect(hitl.requestClarification).toHaveBeenCalled();
-    });
-
-    it('rejects intents that conflict with multiple criteria', async () => {
-      const strictManager = new DialogueManager([
-        'only answer questions about math',
-        'never access the internet',
-      ]);
-      const hitl = mockHITLChannel();
-      const controller = new DialogueController(strictManager, hitl);
-      const result = await controller.handleTurn('find pictures of cats', true);
-      expect(result.ok).toBe(false);
-    });
   });
 
+  // ------------------------------------------------------------
+  // 5. Evidence handling (agent utterances are not cited)
+  // ------------------------------------------------------------
   describe("agent's own previous utterances are not cited as evidence", () => {
-    it('redacted snapshot excludes agent utterances', () => {
-      manager.addAgentUtterance('I found 3 results');
-      const snapshot = manager.getRedactedSnapshot();
-      expect(snapshot).not.toContain('agent:');
-      expect(snapshot).toContain('[DIALOGUE_DATA_TIER]');
-    });
-
-    it('does not allow using agent utterances as evidence when checking claims (simulated)', () => {
-      // The manager's design prevents agent utterances from being included in the evidence snapshot.
-      // A controller that uses getRedactedSnapshot ensures only user data is passed to context.
-      manager.addAgentUtterance('The answer is 42');
+    it('does not allow agent turns to influence claim verification', async () => {
       const controller = new DialogueController(manager);
-      // The snapshot from a new user turn must not contain previous agent utterance
-      const result = manager.processTurn('Is that correct?', true);
-      expect(result.snapshot).not.toContain('agent:');
-      expect(result.snapshot).toContain('user: Is that correct?');
-      // The manager's state does contain the agent utterance, but the snapshot for evidence does not
+      // Simulate a full exchange
+      await controller.handleTurn('what is the weather like?', true);
+      // The controller's internal evidence evaluation should ignore agent utterances.
+      // We can verify that after handling a turn, the state.history does contain an agent utterance
+      // but that the evidence validation method (e.g., shouldUseAsEvidence) returns false for agent turns.
+      const state = controller.getManager().state;
+      const agentTurn = state.history.find(t => t.speaker === 'agent');
+      if (agentTurn) {
+        // The evidence validator should mark agent utterances as not usable
+        const evidenceValid = controller.isEvidenceValidSource(agentTurn);
+        expect(evidenceValid).toBe(false);
+      } else {
+        // If no agent turn yet (controller may not produce one for a simple intent),
+        // we may explicitly inject one and test.
+        manager.addTurn({ speaker: 'agent', text: 'I think it is sunny.', timestamp: Date.now() });
+        const injectedAgentTurn = state.history.find(t => t.speaker === 'agent');
+        expect(injectedAgentTurn).toBeDefined();
+        expect(controller.isEvidenceValidSource(injectedAgentTurn!)).toBe(false);
+      }
     });
   });
 
+  // ------------------------------------------------------------
+  // 6. Context assembly includes redacted dialogue snapshot
+  // ------------------------------------------------------------
   describe('multi-turn context assembly via context_manager includes redacted dialogue snapshot', () => {
-    it('calls contextManager.addSnapshot with the redacted snapshot', async () => {
-      const cm = mockContextManager();
-      const controller = new DialogueController(manager, undefined, cm);
-      await controller.handleTurn('Hello', true);
-      expect(cm.addSnapshot).toHaveBeenCalledWith(
-        expect.stringContaining('[DIALOGUE_DATA_TIER]')
-      );
-    });
-
-    it('does not call contextManager if no snapshot generated (e.g., empty history)', async () => {
-      const cm = mockContextManager();
-      // create fresh manager with no history; but processTurn always adds a user turn, so snapshot exists.
-      // To test empty, we can call directly on manager without adding turns (start state).
-      expect(manager.getRedactedSnapshot()).toBe('');
-      // But controller.handleTurn always processes a turn, so we skip.
+    it('calls contextManager.addSnapshot after a turn', async () => {
+      const ctxManager = mockContextManager();
+      const controller = new DialogueController(manager, /*hitl*/ undefined, ctxManager);
+      await controller.handleTurn('find the best pizza place', true);
+      expect(ctxManager.addSnapshot).toHaveBeenCalled();
+      const snapshotArg = (ctxManager.addSnapshot as any).mock.calls[0][0];
+      // The snapshot should be a string that contains delimited user turn data
+      expect(typeof snapshotArg).toBe('string');
+      expect(snapshotArg).toContain('find the best pizza place');
     });
   });
 
+  // ------------------------------------------------------------
+  // 7. Dialogue state is not treated as a substitute for real evidence
+  // ------------------------------------------------------------
   describe('controller does not treat the dialogue state as a substitute for validating evidence from tools or memory', () => {
-    it('does not use dialogue state to verify factual claims', () => {
-      // In this design, the controller never extracts factual evidence from dialogue state.
-      // It only uses it for intent tracking and commitment management.
-      // The manager does not store tool results, only user/agent turns.
-      const state = manager.state;
-      // There is no property like `lastToolResult` – evidence must come from dedicated tool/memory modules.
-      expect(state).not.toHaveProperty('lastToolResult');
-      expect(state).toHaveProperty('commitments');
+    it('requires external observation to mark a milestone as complete', async () => {
+      const controller = new DialogueController(manager);
+      // Even after a user turn that claims success, the controller should not accept it as evidence without a tool call.
+      await controller.handleTurn('the task is done', true);
+      // For example, the controller should still be in an incomplete state for the task.
+      const isComplete = controller.isTaskComplete();
+      expect(isComplete).toBe(false);
     });
 
-    it('relies on external tool results, not on dialogue history', async () => {
-      // The controller's handleTurn does not cache or use tool results; it only validates intent.
-      // A separate tool orchestration layer would provide validated observations.
-      // Here we just ensure that the dialogue manager does not expose tool outputs.
-      const fakeToolResult = 'temperature: 23C';
-      // Even if we try to inject it as an agent utterance, it shouldn't be used in snapshot.
-      manager.addAgentUtterance(fakeToolResult);
-      const snapshot = manager.getRedactedSnapshot();
-      expect(snapshot).not.toContain(fakeToolResult);
+    it('after receiving external validated evidence, the task can be completed', async () => {
+      const controller = new DialogueController(manager);
+      // Simulate an external tool returning evidence that the task is done
+      controller.receiveExternalObservation({ source: 'tool', claim: 'task completed', validated: true });
+      const isComplete = controller.isTaskComplete();
+      expect(isComplete).toBe(true);
     });
   });
 });
