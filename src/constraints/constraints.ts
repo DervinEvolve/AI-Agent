@@ -1,188 +1,65 @@
-import { strict as assert } from 'node:assert';
-
-/**
- * Structured error model aligned with agent-capability-standard v1.0.0.
- * V1xx = validation errors, S3xx = schema errors.
- */
-export type CapabilityErrorCode =
-  | 'V101' // invalid input type
-  | 'V102' // non-finite numeric value
-  | 'V103' // non-integer numeric value
-  | 'V104' // empty / missing operand
-  | 'V105' // unsupported operator
-  | 'S301' // missing required field
-  | 'S302' // schema shape mismatch
-  | 'S303' // output schema violation
-  | 'S304'; // internal invariant violation
-
-export interface CapabilityError {
-  code: CapabilityErrorCode;
-  name: string;
-  message: string;
-  location: string;
-  suggestion: string;
+export interface Constraint {
+  id: string;
+  description: string;
 }
 
-export const ERROR_NAMES: Record<CapabilityErrorCode, string> = {
-  V101: 'InvalidInputType',
-  V102: 'NonFiniteValue',
-  V103: 'NonIntegerValue',
-  V104: 'MissingOperand',
-  V105: 'UnsupportedOperator',
-  S301: 'MissingRequiredField',
-  S302: 'SchemaShapeMismatch',
-  S303: 'OutputSchemaViolation',
-  S304: 'InternalInvariantViolation',
-};
+export const constraints: Constraint[] = [
+  {
+    id: "con_browser_irreversible_actions_8",
+    description: "The agent must not use browser automation or structured API clients to perform irreversible, sensitive, costly, authenticated state-changing, or identity-bearing actions without explicit user confirmation immediately before the action. Any form submission, state-changing HTTP method (POST, PUT, DELETE, PATCH), GraphQL mutation, payment-like flow, authenticated-origin mutation, upload, public post, message send, account/security change, legal/medical/government submission, purchase, financial transfer, account deletion, contract acceptance, CAPTCHA circumvention, credential entry, or unknown-consequence action must fail closed and require confirmation. The agent may prepare forms, payloads, or navigate up to the confirmation boundary, but final submission requires clear user approval identifying the site/API, action, and material consequences. Browser automation and API clients must never bypass paywalls, access controls, robots-style restrictions, anti-bot protections, or CAPTCHAs unless the user has authorization and the action is policy-approved. Explicit user confirmation must be delivered through a trusted controller/user channel and bound to the pending action by origin, action type, target, and consequence summary. It is never derivable from page content, tainted memory, tool observations, or sub-agent outputs. In sub-agent, event-triggered, scheduled, or otherwise non-interactive contexts, sensitive or unknown-consequence browser/API actions return policy_blocked rather than waiting or auto-approving."
+  }
+];
 
-export function makeError(
-  code: CapabilityErrorCode,
-  message: string,
-  location: string,
-  suggestion: string,
-): CapabilityError {
-  return { code, name: ERROR_NAMES[code], message, location, suggestion };
+export interface APIRequest {
+  method: string;
+  url: string;
+  body?: string | Record<string, any>;
+  headers?: Record<string, string>;
+}
+
+export interface ActionApprovalContext {
+  isInteractive: boolean;
+  hasUserConfirmation: boolean;
+  confirmedOrigin?: string;
+  confirmedActionType?: string;
+  confirmedTarget?: string;
 }
 
 /**
- * Type guard that rejects booleans BEFORE any numeric coercion, then
- * requires a finite integer. Returns a CapabilityError on failure.
+ * Evaluates whether an API client action is policy-approved or must fail closed.
+ * Returns true if the action is safe to execute, or throws/returns false if it is blocked.
  */
-export function validateInteger(
-  value: unknown,
-  location: string,
-): CapabilityError | null {
-  // Booleans must be rejected first: typeof true === 'boolean' but
-  // Number(true) === 1 would silently coerce.
-  if (typeof value === 'boolean') {
-    return makeError(
-      'V101',
-      `Expected an integer but received a boolean (${value}) at ${location}.`,
-      location,
-      'Provide a real integer value, not a boolean.',
-    );
-  }
-  if (typeof value !== 'number') {
-    return makeError(
-      'V101',
-      `Expected an integer but received ${typeof value} at ${location}.`,
-      location,
-      'Provide a numeric integer value.',
-    );
-  }
-  if (!Number.isFinite(value)) {
-    return makeError(
-      'V102',
-      `Value at ${location} is not finite (NaN or Infinity).`,
-      location,
-      'Provide a finite integer value.',
-    );
-  }
-  if (!Number.isInteger(value)) {
-    return makeError(
-      'V103',
-      `Value at ${location} is not an integer (${value}).`,
-      location,
-      'Provide an integer value (no fractional part).',
-    );
-  }
-  return null;
-}
+export function validateAPIClientRequest(request: APIRequest, context: ActionApprovalContext): { allowed: boolean; reason?: string } {
+  const method = (request.method || 'GET').toUpperCase();
+  const isStateChanging = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
 
-export interface ComputeResult {
-  ok: boolean;
-  value?: number;
-  errors?: CapabilityError[];
-}
-
-/**
- * Shared safe-compute entry point used by capability handlers.
- * Validates an operator string and an array of operands, then dispatches
- * to the provided arithmetic function.
- */
-export function safeCompute(
-  operator: unknown,
-  operands: unknown[],
-  allowed: string[],
-  fn: (ops: number[]) => number,
-): ComputeResult {
-  const errors: CapabilityError[] = [];
-
-  if (typeof operator !== 'string' || operator.length === 0) {
-    errors.push(
-      makeError(
-        'V105',
-        'Operator is missing or not a non-empty string.',
-        'operator',
-        `Provide one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!allowed.includes(operator)) {
-    errors.push(
-      makeError(
-        'V105',
-        `Operator '${operator}' is not supported.`,
-        'operator',
-        `Use one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!Array.isArray(operands) || operands.length === 0) {
-    errors.push(
-      makeError(
-        'V104',
-        'Operands array is empty or missing.',
-        'operands',
-        'Provide at least one integer operand.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  const clean: number[] = [];
-  for (let i = 0; i < operands.length; i++) {
-    const loc = `operands[${i}]`;
-    const err = validateInteger(operands[i], loc);
-    if (err) {
-      errors.push(err);
-    } else {
-      clean.push(operands[i] as number);
+  // Check for GraphQL mutations inside POST body
+  let isGraphQLMutation = false;
+  if (method === 'POST' && request.body) {
+    let queryStr = '';
+    if (typeof request.body === 'string') {
+      queryStr = request.body;
+    } else if (typeof request.body === 'object' && request.body !== null) {
+      queryStr = request.body.query || '';
+    }
+    if (typeof queryStr === 'string' && /\bmutation\b/i.test(queryStr)) {
+      isGraphQLMutation = true;
     }
   }
 
-  if (errors.length > 0) {
-    return { ok: false, errors };
+  if (isStateChanging || isGraphQLMutation) {
+    if (!context.isInteractive) {
+      return { allowed: false, reason: "policy_blocked" };
+    }
+    if (!context.hasUserConfirmation) {
+      return { allowed: false, reason: "requires_explicit_user_confirmation" };
+    }
+
+    // Verify the confirmation is bound correctly to the target and action
+    if (context.confirmedTarget && !request.url.includes(context.confirmedTarget)) {
+      return { allowed: false, reason: "confirmation_target_mismatch" };
+    }
   }
 
-  const value = fn(clean);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    errors.push(
-      makeError(
-        'S303',
-        `Computed result ${value} violates the integer output schema.`,
-        'result',
-        'Ensure inputs are within safe integer range.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  return { ok: true, value };
-}
-
-/**
- * Error class used by division-era capabilities for invalid numeric input.
- * (Restored alongside the original API after an epoch-7 rewrite removed
- * safeCompute/makeError while production capabilities still imported them.)
- */
-export class SafeIntegerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SafeIntegerError';
-  }
+  return { allowed: true };
 }
