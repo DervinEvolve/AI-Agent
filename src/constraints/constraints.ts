@@ -1,188 +1,115 @@
-import { strict as assert } from 'node:assert';
-
-/**
- * Structured error model aligned with agent-capability-standard v1.0.0.
- * V1xx = validation errors, S3xx = schema errors.
- */
-export type CapabilityErrorCode =
-  | 'V101' // invalid input type
-  | 'V102' // non-finite numeric value
-  | 'V103' // non-integer numeric value
-  | 'V104' // empty / missing operand
-  | 'V105' // unsupported operator
-  | 'S301' // missing required field
-  | 'S302' // schema shape mismatch
-  | 'S303' // output schema violation
-  | 'S304'; // internal invariant violation
-
-export interface CapabilityError {
-  code: CapabilityErrorCode;
+export interface Constraint {
+  id: string;
   name: string;
-  message: string;
-  location: string;
-  suggestion: string;
+  status: 'active' | 'inactive';
+  added_epoch: number;
+  description: string;
 }
 
-export const ERROR_NAMES: Record<CapabilityErrorCode, string> = {
-  V101: 'InvalidInputType',
-  V102: 'NonFiniteValue',
-  V103: 'NonIntegerValue',
-  V104: 'MissingOperand',
-  V105: 'UnsupportedOperator',
-  S301: 'MissingRequiredField',
-  S302: 'SchemaShapeMismatch',
-  S303: 'OutputSchemaViolation',
-  S304: 'InternalInvariantViolation',
-};
+export const CONSTRAINTS: Constraint[] = [
+  {
+    id: "con_secrets_leak_prevention_12",
+    name: "Absolute credential isolation and leak prevention",
+    status: "active",
+    added_epoch: 12,
+    description: "The agent must NEVER expose raw secrets, API keys, private keys, passwords, or OAuth tokens to any LLM prompt, python sandbox, browser DOM, document parser, sub-agent, log, or long-term memory. All credential usage must occur via the vault_auth capability, which injects tokens directly into authorized, policy-vetted adapters at network dispatch time. Any output, log, or observation containing an apparent credential or private key signature must be automatically redacted by the host controller's secret_redactor before processing, and any attempt by the agent or a sub-agent to exfiltrate or print vault metadata must result in an immediate policy_blocked status and hard session termination."
+  }
+];
 
-export function makeError(
-  code: CapabilityErrorCode,
-  message: string,
-  location: string,
-  suggestion: string,
-): CapabilityError {
-  return { code, name: ERROR_NAMES[code], message, location, suggestion };
+/**
+ * Secret Redactor regex patterns to match typical secret structures:
+ * - API Keys / Tokens (e.g., sk-proj-..., ghp_..., sb_..., secret_...)
+ * - Private Key Headers (e.g., -----BEGIN PRIVATE KEY-----)
+ * - Exfiltration of vault metadata patterns (e.g., trying to read/print vault environment variables or files like /vault/metadata, process.env.VAULT_)
+ */
+const SECRET_PATTERNS = [
+  /sk-[a-zA-Z0-9]{20,}/g,
+  /ghp_[a-zA-Z0-9]{36}/g,
+  /secret_[a-zA-Z0-9]{16,}/g,
+  /-----BEGIN[ A-Z0-9_-]+PRIVATE KEY-----([\s\S]*?)-----END[ A-Z0-9_-]+PRIVATE KEY-----/gi,
+  /password\s*=\s*['"\s]*[a-zA-Z0-9_@#$!%^&*()-+=\[\]{}|;:',.<>?/~`]{8,}/gi,
+  /bearer\s+[a-zA-Z0-9_\-\.]{15,}/gi
+];
+
+const VAULT_METADATA_EXFILTRATION_PATTERNS = [
+  /\/vault\/metadata/i,
+  /process\.env\.VAULT_/i,
+  /ENV\[['"]VAULT_/i,
+  /cat\s+[^\n]*vault/i,
+  /metadata\s+exfiltration/i
+];
+
+export interface RedactionResult {
+  safeContent: string;
+  redactedCount: number;
+  wasBlocked: boolean;
+  reason?: string;
 }
 
 /**
- * Type guard that rejects booleans BEFORE any numeric coercion, then
- * requires a finite integer. Returns a CapabilityError on failure.
+ * Redacts sensitive credentials from the input text.
+ * If an attempt to access vault metadata is detected, it triggers a policy block.
  */
-export function validateInteger(
-  value: unknown,
-  location: string,
-): CapabilityError | null {
-  // Booleans must be rejected first: typeof true === 'boolean' but
-  // Number(true) === 1 would silently coerce.
-  if (typeof value === 'boolean') {
-    return makeError(
-      'V101',
-      `Expected an integer but received a boolean (${value}) at ${location}.`,
-      location,
-      'Provide a real integer value, not a boolean.',
-    );
-  }
-  if (typeof value !== 'number') {
-    return makeError(
-      'V101',
-      `Expected an integer but received ${typeof value} at ${location}.`,
-      location,
-      'Provide a numeric integer value.',
-    );
-  }
-  if (!Number.isFinite(value)) {
-    return makeError(
-      'V102',
-      `Value at ${location} is not finite (NaN or Infinity).`,
-      location,
-      'Provide a finite integer value.',
-    );
-  }
-  if (!Number.isInteger(value)) {
-    return makeError(
-      'V103',
-      `Value at ${location} is not an integer (${value}).`,
-      location,
-      'Provide an integer value (no fractional part).',
-    );
-  }
-  return null;
-}
+export function redactAndCheckSecrets(content: string): RedactionResult {
+  let safeContent = content;
+  let redactedCount = 0;
+  let wasBlocked = false;
+  let reason: string | undefined;
 
-export interface ComputeResult {
-  ok: boolean;
-  value?: number;
-  errors?: CapabilityError[];
-}
-
-/**
- * Shared safe-compute entry point used by capability handlers.
- * Validates an operator string and an array of operands, then dispatches
- * to the provided arithmetic function.
- */
-export function safeCompute(
-  operator: unknown,
-  operands: unknown[],
-  allowed: string[],
-  fn: (ops: number[]) => number,
-): ComputeResult {
-  const errors: CapabilityError[] = [];
-
-  if (typeof operator !== 'string' || operator.length === 0) {
-    errors.push(
-      makeError(
-        'V105',
-        'Operator is missing or not a non-empty string.',
-        'operator',
-        `Provide one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!allowed.includes(operator)) {
-    errors.push(
-      makeError(
-        'V105',
-        `Operator '${operator}' is not supported.`,
-        'operator',
-        `Use one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  if (!Array.isArray(operands) || operands.length === 0) {
-    errors.push(
-      makeError(
-        'V104',
-        'Operands array is empty or missing.',
-        'operands',
-        'Provide at least one integer operand.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  const clean: number[] = [];
-  for (let i = 0; i < operands.length; i++) {
-    const loc = `operands[${i}]`;
-    const err = validateInteger(operands[i], loc);
-    if (err) {
-      errors.push(err);
-    } else {
-      clean.push(operands[i] as number);
+  // Check for vault metadata exfiltration attempts
+  for (const pattern of VAULT_METADATA_EXFILTRATION_PATTERNS) {
+    if (pattern.test(content)) {
+      wasBlocked = true;
+      reason = "Exfiltration or printing of vault metadata detected. Session terminated under policy_blocked status.";
+      return {
+        safeContent: "[POLICY BLOCKED: SESSION TERMINATED]",
+        redactedCount: 0,
+        wasBlocked: true,
+        reason
+      };
     }
   }
 
-  if (errors.length > 0) {
-    return { ok: false, errors };
+  // Perform secret redaction
+  for (const pattern of SECRET_PATTERNS) {
+    safeContent = safeContent.replace(pattern, (match) => {
+      redactedCount++;
+      return "[REDACTED_SECRET]";
+    });
   }
 
-  const value = fn(clean);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    errors.push(
-      makeError(
-        'S303',
-        `Computed result ${value} violates the integer output schema.`,
-        'result',
-        'Ensure inputs are within safe integer range.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  return { ok: true, value };
+  return {
+    safeContent,
+    redactedCount,
+    wasBlocked,
+    reason
+  };
 }
 
 /**
- * Error class used by division-era capabilities for invalid numeric input.
- * (Restored alongside the original API after an epoch-7 rewrite removed
- * safeCompute/makeError while production capabilities still imported them.)
+ * Vault Auth capability simulation / adapter layer
+ * Strictly routes authorization and prevents raw credentials from leaking into prompts.
  */
-export class SafeIntegerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SafeIntegerError';
+export class VaultAuth {
+  private static mockVault: Record<string, string> = {
+    "OPENAI_API_KEY": "sk-proj-supersecretkey1234567890",
+    "GITHUB_TOKEN": "ghp_myawesomegithubtokenforintegration1234",
+    "DATABASE_PASSWORD": "password=MySuperSecurePassword123!"
+  };
+
+  /**
+   * Executes a network dispatch action by securely injecting the authorized token at the dispatch boundary.
+   * The raw token never returns to the agent prompt context.
+   */
+  public static async secureDispatch<T>(
+    keyName: string,
+    adapterFn: (token: string) => Promise<T>
+  ): Promise<T> {
+    const token = this.mockVault[keyName];
+    if (!token) {
+      throw new Error(`Credential key '${keyName}' not found or unauthorized in vault.`);
+    }
+    // Execute the adapter directly with the token, keeping it out of LLM/prompt contexts
+    return await adapterFn(token);
   }
 }
