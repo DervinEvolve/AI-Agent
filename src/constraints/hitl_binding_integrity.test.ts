@@ -55,41 +55,68 @@ describe('verifyActionBinding', () => {
 
   it('rejects replayed approval_token (already consumed)', () => {
     const token = generateToken(baseAction);
-    const firstResult = verifyActionBinding(baseAction, token, secretKey, nonceStore);
-    expect(firstResult.valid).toBe(true);
-    const secondResult = verifyActionBinding(baseAction, token, secretKey, nonceStore);
-    expect(secondResult.valid).toBe(false);
-    expect(secondResult.reason).toContain('already consumed');
+    // First use succeeds
+    const first = verifyActionBinding(baseAction, token, secretKey, nonceStore);
+    expect(first.valid).toBe(true);
+    // Second use with same nonce fails
+    const second = verifyActionBinding(baseAction, token, secretKey, nonceStore);
+    expect(second.valid).toBe(false);
+    expect(second.reason).toBe('invalid_signature: nonce already consumed');
   });
 
-  it('rejects plaintext "approved" message', () => {
+  it('rejects plaintext "approved" as token (no proper HMAC binding)', () => {
     const result = verifyActionBinding(baseAction, 'approved', secretKey, nonceStore);
     expect(result.valid).toBe(false);
     expect(result.reason).toBe('invalid_signature');
   });
 
-  it('rejects missing or mismatched approval_token', () => {
-    const result1 = verifyActionBinding(baseAction, '', secretKey, nonceStore);
-    expect(result1.valid).toBe(false);
-    const result2 = verifyActionBinding(baseAction, 'random_token', secretKey, nonceStore);
-    expect(result2.valid).toBe(false);
-  });
-
-  it('rejects token that is not properly bound (sub-agent output)', () => {
-    const result = verifyActionBinding(baseAction, 'sub_agent_claims_approval', secretKey, nonceStore);
-    expect(result.valid).toBe(false);
-  });
-
-  it('verification is designed to be called at dispatch time', () => {
-    // This test is a placeholder; actual enforcement happens at dispatch.
-    expect(true).toBe(true);
+  it('accepts a correctly generated token', () => {
+    const token = generateToken(baseAction);
+    const result = verifyActionBinding(baseAction, token, secretKey, nonceStore);
+    expect(result.valid).toBe(true);
+    expect(result.reason).toBe('ok');
   });
 
   it('rejects expired token', () => {
-    const expiredAction = { ...baseAction, timestamp: Date.now() - 10 * 60 * 1000 };
-    const token = generateToken(expiredAction);
-    const result = verifyActionBinding(expiredAction, token, secretKey, nonceStore);
+    const oldAction = { ...baseAction, timestamp: Date.now() - 6 * 60 * 1000 }; // 6 min ago
+    const token = generateToken(oldAction);
+    const result = verifyActionBinding(oldAction, token, secretKey, nonceStore);
     expect(result.valid).toBe(false);
     expect(result.reason).toBe('expired');
+  });
+
+  it('rejects token generated with wrong secret', () => {
+    const wrongSecret = 'wrong-secret';
+    const token = crypto
+      .createHmac('sha256', wrongSecret)
+      .update(canonicalizeAction(baseAction))
+      .digest('base64');
+    const result = verifyActionBinding(baseAction, token, secretKey, nonceStore);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('invalid_signature');
+  });
+
+  it('rejects tampered nonce (nonce mismatch invalidates signature)', () => {
+    const token = generateToken(baseAction);
+    const tamperedAction = { ...baseAction, nonce: 'different-nonce' };
+    const result = verifyActionBinding(tamperedAction, token, secretKey, nonceStore);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('invalid_signature');
+  });
+
+  it('rejects tampered timestamp (timestamp mismatch invalidates signature)', () => {
+    const token = generateToken(baseAction);
+    const tamperedAction = { ...baseAction, timestamp: baseAction.timestamp + 1 };
+    const result = verifyActionBinding(tamperedAction, token, secretKey, nonceStore);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('invalid_signature');
+  });
+
+  it('rejects tampered target_adapter', () => {
+    const token = generateToken(baseAction);
+    const tamperedAction = { ...baseAction, target_adapter: 'other_adapter' };
+    const result = verifyActionBinding(tamperedAction, token, secretKey, nonceStore);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('invalid_signature');
   });
 });
