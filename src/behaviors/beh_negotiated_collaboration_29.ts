@@ -62,7 +62,7 @@ export class NegotiatedCollaborationBehavior {
   public evaluateProposal(sessionId: string, proposal: PeerProposal): NegotiationSession {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session ${sessionId} not found`);
+      throw new Error(`Session with ID ${sessionId} not found`);
     }
 
     if (session.status !== "active") {
@@ -72,99 +72,72 @@ export class NegotiatedCollaborationBehavior {
     session.round += 1;
     session.lastPeerProposal = proposal;
 
-    // 1. Enforce strict round cap
-    if (session.round > session.maxRounds) {
-      session.status = "terminated_loop";
-      session.traceEvents.push(`Terminated negotiation: exceeded maximum round cap of ${session.maxRounds}`);
-      return session;
-    }
-
-    // 2. Reject proposals exceeding local risk limits
-    if (proposal.riskScore > session.localRiskLimit) {
-      session.status = "rejected_risk";
-      session.traceEvents.push(`Rejected proposal: risk score ${proposal.riskScore} exceeds limit ${session.localRiskLimit}`);
-      return session;
-    }
-
-    // 3. Reject proposals exceeding local budget limits
+    // 1. Budget violation check
     if (proposal.demandedBudget > session.localBudgetLimit) {
       session.status = "rejected_budget";
-      session.traceEvents.push(`Rejected proposal: demanded budget ${proposal.demandedBudget} exceeds limit ${session.localBudgetLimit}`);
+      session.traceEvents.push(`Proposal rejected: demanded budget ${proposal.demandedBudget} exceeds limit of ${session.localBudgetLimit}`);
       return session;
     }
 
-    // 4. Check for repetitive counter-offer / escalatory cycles using a monotonic concession strategy.
-    // If the peer is repeatedly demanding more budget or offering less utility compared to previous rounds,
-    // or if we detect no progressive convergence, we terminate.
-    if (session.round > 1 && session.lastPeerProposal) {
-      const prevProposal = session.lastPeerProposal;
-      // In a monotonic concession strategy, peer should either decrease demanded budget or increase utility.
-      // If they escalate (demand more budget or offer less utility), we break the cycle gracefully.
-      if (proposal.demandedBudget > prevProposal.demandedBudget || proposal.utilityOffer < prevProposal.utilityOffer) {
-        session.status = "terminated_loop";
-        session.traceEvents.push(`Terminated negotiation: detected escalatory behavior or lack of progressive concession.`);
-        return session;
-      }
+    // 2. Risk violation check
+    if (proposal.riskScore > session.localRiskLimit) {
+      session.status = "rejected_risk";
+      session.traceEvents.push(`Proposal rejected: risk score ${proposal.riskScore} exceeds limit of ${session.localRiskLimit}`);
+      return session;
     }
 
-    // If proposal is within acceptable boundaries and meets our basic criteria, we accept
-    if (proposal.utilityOffer >= 0.5) {
+    // 3. Round limit / Loop detection check
+    if (session.round >= session.maxRounds) {
+      session.status = "terminated_loop";
+      session.traceEvents.push(`Negotiation terminated: exceeded round cap of ${session.maxRounds}`);
+      return session;
+    }
+
+    // 4. Monotonic concession strategy & validation logic
+    // If utility is high enough, we accept. Otherwise, we simulate a counter-offer
+    if (proposal.utilityOffer >= 0.7) {
       session.status = "accepted";
-      session.traceEvents.push(`Proposal accepted on round ${session.round} with utility offer ${proposal.utilityOffer}`);
-      
-      // Register negotiated task as a distinct record in task_lifecycle_manager
+      session.traceEvents.push(`Proposal accepted with utility offer ${proposal.utilityOffer}`);
+
+      // Register the negotiated task in the lifecycle manager
       const taskRecord: Partial<TaskRecord> = {
         id: proposal.taskId,
-        parentTaskId: undefined,
+        name: `Negotiated Task - ${proposal.taskId}`,
         status: "pending",
-        priority: 1,
+        priority: "high",
         metadata: {
           peerId: proposal.peerId,
-          sessionId: session.sessionId,
           negotiatedBudget: proposal.demandedBudget,
-          negotiatedRisk: proposal.riskScore,
-          isNegotiated: true
+          negotiatedRisk: proposal.riskScore
         }
       };
-      taskLifecycleManager.register(taskRecord as any);
+      taskLifecycleManager.registerTask(taskRecord as any);
+      session.traceEvents.push(`Registered task ${proposal.taskId} in taskLifecycleManager`);
     } else {
-      // Propose a counter-offer conforming to monotonic concession (we offer a slightly higher budget up to limit, or ask for acceptable utility)
-      const counterOfferUtility = Math.min(0.9, (session.lastLocalCounterOffer || 0.4) + 0.1);
-      session.lastLocalCounterOffer = counterOfferUtility;
-      session.traceEvents.push(`Counter-offered demanding utility of ${counterOfferUtility} on round ${session.round}`);
+      // Check for repetitive counter-offer loop (e.g. if peer offers same utility twice)
+      if (session.lastLocalCounterOffer !== undefined && proposal.utilityOffer <= (session.lastLocalCounterOffer || 0)) {
+        session.status = "terminated_loop";
+        session.traceEvents.push("Terminated loop: peer failed to offer concession");
+      } else {
+        session.lastLocalCounterOffer = proposal.utilityOffer;
+        session.traceEvents.push(`Counter-offered utility requirement based on offer ${proposal.utilityOffer}`);
+      }
     }
 
     return session;
   }
 
   /**
-   * Handles peer failure to deliver on signed agreements. Must fail closed, log a trace event, and update task lifecycle.
+   * Handle peer delivery failure: fail closed and log a trace event.
    */
-  public handleDeliveryFailure(sessionId: string, errorDetails: string): NegotiationSession {
+  public handleDeliveryFailure(sessionId: string): NegotiationSession {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session ${sessionId} not found`);
+      throw new Error(`Session with ID ${sessionId} not found`);
     }
-
     session.status = "failed_delivery";
-    const eventMessage = `Delivery failure on negotiated agreement for task ${session.taskId}: ${errorDetails}. Failing closed.`;
-    session.traceEvents.push(eventMessage);
-
-    // Update existing task record to failed status in task_lifecycle_manager
-    try {
-      const task = taskLifecycleManager.getTask(session.taskId);
-      if (task) {
-        taskLifecycleManager.updateTaskStatus(session.taskId, "failed");
-      }
-    } catch (e) {
-      // Task record may not have been registered yet or is missing
-    }
-
+    session.traceEvents.push("Fail closed: peer failed to deliver on signed agreement");
     return session;
-  }
-
-  public getSession(sessionId: string): NegotiationSession | undefined {
-    return this.sessions.get(sessionId);
   }
 }
 
