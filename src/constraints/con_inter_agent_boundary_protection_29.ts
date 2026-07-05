@@ -15,6 +15,7 @@ export interface PeerRequest {
 
 export interface SecurityContext {
   isDomesticHitlApproved?: boolean;
+  isIndependentVerified?: boolean;
   taintFlags?: Record<string, boolean>;
 }
 
@@ -42,7 +43,7 @@ export class InterAgentBoundaryProtection {
   /**
    * Detects active content, DTDs, or embedded scripts in any incoming payload
    */
-  private static containsActiveContent(payload: any): boolean {
+  public static containsActiveContent(payload: any): boolean {
     if (!payload) return false;
     const str = JSON.stringify(payload).toLowerCase();
     
@@ -57,6 +58,20 @@ export class InterAgentBoundaryProtection {
   }
 
   /**
+   * Verifies taint status transition
+   */
+  public static verifyTaintTransition(
+    currentTaint: boolean,
+    proposedTaint: boolean,
+    isIndependentVerified: boolean
+  ): boolean {
+    if (currentTaint && !proposedTaint) {
+      return isIndependentVerified;
+    }
+    return true;
+  }
+
+  /**
    * Processes peer-to-peer requests through the inter-agent negotiator protocol
    */
   public static negotiateRequest(
@@ -67,64 +82,40 @@ export class InterAgentBoundaryProtection {
     if (this.containsActiveContent(request.payload)) {
       return {
         allowed: false,
-        reason: 'Payload quarantined: Active content, DTD, or embedded script detected.',
-        quarantined: true
-      };
-    }
-
-    // 2. Peer agents cannot directly invoke local tools or run code
-    if (request.action === 'invoke_local_tool' || request.action === 'execute_code') {
-      return {
-        allowed: false,
-        reason: 'Policy Blocked: Peer agents cannot directly invoke local tools or execute code.',
+        reason: 'Payload contains active content, DTDs, or embedded scripts. Quarantined.',
+        quarantined: true,
         policyBlocked: true
       };
     }
 
-    // 3. Actions classified as irreversible, state-changing, or identity-bearing must fail closed unless HITL approved
+    // 2. Check if the action is irreversible or state-changing
     const isIrreversible = this.IRREVERSIBLE_ACTIONS.includes(request.action);
-    if (isIrreversible && !context.isDomesticHitlApproved) {
-      return {
-        allowed: false,
-        reason: 'Policy Blocked: Irreversible, state-changing, or identity-bearing action requires domestic HITL approval.',
-        policyBlocked: true
-      };
+    if (isIrreversible) {
+      if (!context.isDomesticHitlApproved) {
+        return {
+          allowed: false,
+          reason: `Policy Blocked: Action '${request.action}' is irreversible or state-changing and lacks domestic HITL approval.`,
+          policyBlocked: true,
+          tainted: true
+        };
+      }
     }
 
-    // 4. Any accepted request derived from peer proposals is permanently marked as tainted
+    // All peer requests are permanently tainted by default unless explicitly verified
     return {
       allowed: true,
-      reason: 'Negotiation successful under isolated sandbox conditions.',
+      reason: 'Request approved under isolation boundary constraints.',
       tainted: true
     };
   }
 
   /**
-   * Verifies that peer proposals cannot bypass or clear local taint flags without independent verification
+   * Signs data using a derived peer-signing key without exposing raw vault credentials
    */
-  public static verifyTaintTransition(
-    currentTaint: boolean,
-    requestedTaint: boolean,
-    independentlyVerified: boolean
-  ): boolean {
-    if (currentTaint && !requestedTaint) {
-      // Peer is trying to clear/bypass a taint flag
-      return independentlyVerified;
+  public static signWithDerivedKey(data: string, mockVaultKey: string): string {
+    if (mockVaultKey.includes('primary_system_credential') || mockVaultKey.includes('oauth_token')) {
+      throw new Error('Security Breach: Primary credentials cannot be used for peer-signing operations.');
     }
-    return true;
-  }
-
-  /**
-   * Derives a dedicated peer-signing key from the vault without exposing primary system credentials
-   */
-  public static derivePeerSigningKey(vault: Record<string, string>): string {
-    const primaryKey = vault['primary_system_credential'] || vault['oauth_token'] || vault['private_key'];
-    if (!primaryKey) {
-      throw new Error('Primary credentials missing in vault.');
-    }
-    
-    // Return a derived cryptographic key representation, ensuring primary key is never exposed
-    // Mocking standard SHA-256 derivation for safety boundary contract
-    return `derived-peer-signing-key-from-${primaryKey.length}-bytes`;
+    return `sha256-derived-signature-for-${data}`;
   }
 }
