@@ -47,8 +47,8 @@ export class UncertaintyCalibrator {
    * and contradiction flags.
    */
   public calibrate(claim: Claim, claimsLedger: Claim[]): CalibrationResult {
-    let hasExternalValidation = !!claim.isExternalObservation;
-    let inheritedUncertainty = !!claim.inheritedUncertainty;
+    const hasExternalValidation = !!claim.isExternalObservation;
+    const inheritedUncertainty = !!claim.inheritedUncertainty;
 
     // Check for contradictions in the ledger
     const contradictions = claimsLedger.filter(
@@ -68,19 +68,16 @@ export class UncertaintyCalibrator {
 
     // Lower confidence further if there is inherited uncertainty
     if (inheritedUncertainty) {
-      confidence *= 0.8;
+      confidence *= 0.75;
     }
 
-    // Severe penalty for contradictions
+    // Severe penalty for active contradictions
     if (contradictionsFound) {
       confidence *= 0.5;
     }
 
-    // Clamp to [0, 1]
-    confidence = Math.max(0, Math.min(1, confidence));
-
     return {
-      calibratedConfidence: parseFloat(confidence.toFixed(3)),
+      calibratedConfidence: Math.max(0, Math.min(1.0, confidence)),
       uncertaintyProfile: {
         hasExternalValidation,
         contradictionsFound,
@@ -89,17 +86,13 @@ export class UncertaintyCalibrator {
     };
   }
 
-  private areContradictory(s1: string, s2: string): boolean {
-    const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, '');
-    const c1 = clean(s1);
-    const c2 = clean(s2);
-    if (c1.includes('not') !== c2.includes('not')) {
-      // Simple heuristic for contradiction detection
-      const base1 = c1.replace('not', '').replace(/\s+/g, ' ').trim();
-      const base2 = c2.replace('not', '').replace(/\s+/g, ' ').trim();
-      if (base1 === base2 || base1.includes(base2) || base2.includes(base1)) {
-        return true;
-      }
+  private areContradictory(a: string, b: string): boolean {
+    const cleanA = a.toLowerCase().trim();
+    const cleanB = b.toLowerCase().trim();
+    if (cleanA.includes('not') !== cleanB.includes('not')) {
+      const baseA = cleanA.replace('not', '').replace(/\s+/g, ' ').trim();
+      const baseB = cleanB.replace('not', '').replace(/\s+/g, ' ').trim();
+      return baseA === baseB || cleanA.includes(baseB) || cleanB.includes(baseA);
     }
     return false;
   }
@@ -109,114 +102,115 @@ export class UncertaintyAwareController {
   public calibrator = new UncertaintyCalibrator();
   public claimsLedger: Claim[] = [];
   public milestones: Milestone[] = [];
+  public config: ReActLoopConfig;
   public reasoningTrace: string[] = [];
-  public executionHistory: ExecutionStep[] = [];
+  public correctionAttempts = 0;
 
-  constructor(public config: ReActLoopConfig) {}
+  constructor(config: ReActLoopConfig) {
+    this.config = config;
+  }
 
   public addClaim(claim: Claim): void {
     this.claimsLedger.push(claim);
-    this.logReasoning(`Added claim "${claim.statement}" with initial confidence ${claim.confidence}`);
-
-    // Contradiction resolution attempts in the claim ledger trigger immediate uncertainty assessment
-    const contradictions = this.claimsLedger.filter(
-      (c) => c.id !== claim.id && this.calibrator['areContradictory'](c.statement, claim.statement)
-    );
-    if (contradictions.length > 0) {
-      this.logReasoning(`Contradiction detected! Triggering immediate uncertainty assessment.`);
-      for (const affected of [claim, ...contradictions]) {
-        const res = this.calibrator.calibrate(affected, this.claimsLedger);
-        affected.confidence = res.calibratedConfidence;
-        this.logReasoning(`Recalibrated claim "${affected.statement}" due to contradiction. New confidence: ${res.calibratedConfidence}`);
-      }
-    }
+    this.resolveContradictions();
   }
 
   public addMilestone(milestone: Milestone): void {
-    // Propagate inherited uncertainty forward if any associated claims are low-confidence
-    let hasLowConfidenceClaim = false;
-    for (const claimId of milestone.associatedClaims) {
-      const claim = this.claimsLedger.find((c) => c.id === claimId);
-      if (claim) {
-        const res = this.calibrator.calibrate(claim, this.claimsLedger);
-        if (res.calibratedConfidence < this.config.taskThreshold) {
-          hasLowConfidenceClaim = true;
-        }
-      }
-    }
-
-    if (hasLowConfidenceClaim) {
-      milestone.inheritedUncertainty = true;
-      this.logReasoning(`Milestone "${milestone.name}" marked with inherited uncertainty due to low-confidence upstream dependencies.`);
-    }
     this.milestones.push(milestone);
   }
 
-  public async executeStep(step: ExecutionStep): Promise<{
-    status: 'success' | 'halted' | 'failed';
-    message: string;
-  }> {
-    this.logReasoning(`Evaluating step: ${step.action}`);
+  private resolveContradictions(): void {
+    // Whenever a new claim is added, we run a check to see if it triggers an immediate assessment
+    this.reasoningTrace.push('Executing contradiction resolution assessment on claim ledger');
+    for (const claim of this.claimsLedger) {
+      const result = this.calibrator.calibrate(claim, this.claimsLedger);
+      if (result.uncertaintyProfile.contradictionsFound) {
+        this.reasoningTrace.push(
+          `Contradiction identified on claim ${claim.id}: lowering confidence profile.`
+        );
+      }
+    }
+  }
 
-    // Verify confidence of milestones or upcoming plan steps prior to finalization/execution
-    const associatedMilestones = this.milestones.filter(
-      (m) => m.associatedClaims.length > 0 && m.status === 'pending'
-    );
+  public async executeStep(step: ExecutionStep): Promise<{ status: 'success' | 'failed' | 'halted'; reason?: string }> {
+    this.reasoningTrace.push(`Processing execution step: ${step.action}`);
 
-    for (const milestone of associatedMilestones) {
-      for (const claimId of milestone.associatedClaims) {
-        const claim = this.claimsLedger.find((c) => c.id === claimId);
-        if (!claim) continue;
+    // Propagate inherited uncertainty flags forward to pending milestones
+    this.propagateUncertainty();
 
+    // Before finalizing milestones or committing to actions, calibrate associated claims
+    const pendingMilestones = this.milestones.filter((m) => m.status === 'pending');
+
+    for (const milestone of pendingMilestones) {
+      const associated = this.claimsLedger.filter((c) =>
+        milestone.associatedClaims.includes(c.id)
+      );
+
+      for (const claim of associated) {
         let calibration = this.calibrator.calibrate(claim, this.claimsLedger);
-        this.logReasoning(`Calibrated confidence for claim "${claim.statement}": ${calibration.calibratedConfidence} (threshold: ${this.config.taskThreshold})`);
+        this.reasoningTrace.push(
+          `Calibrated claim ${claim.id} [${claim.statement}]: ${calibration.calibratedConfidence.toFixed(2)}`
+        );
 
-        // If calibrated confidence drops below task threshold, halt forward execution and trigger correction
+        // If calibrated confidence is below threshold, trigger correction or HITL
         if (calibration.calibratedConfidence < this.config.taskThreshold) {
-          this.logReasoning(`Confidence ${calibration.calibratedConfidence} is below threshold ${this.config.taskThreshold}. Halting execution.`);
-          
-          let budget = this.config.correctionBudget;
-          let success = false;
+          this.reasoningTrace.push(
+            `Confidence ${calibration.calibratedConfidence.toFixed(2)} is below task threshold ${this.config.taskThreshold}. Halting forward execution.`
+          );
 
-          while (budget > 0 && !success) {
-            budget--;
-            this.logReasoning(`Running correction loop step. Remaining budget: ${budget}`);
+          if (this.correctionAttempts < this.config.correctionBudget) {
+            this.correctionAttempts++;
+            this.reasoningTrace.push(`Triggering correction loop attempt ${this.correctionAttempts}`);
             
-            // Attempt correction: e.g. request details, seek external validation
             if (this.config.onHITLRequest) {
-              const correctedVal = await this.config.onHITLRequest(`Please clarify claim: ${claim.statement}`);
-              claim.statement = correctedVal;
-              claim.isExternalObservation = true; // HITL counts as external validation
-            }
-            
-            // Re-calibrate
-            calibration = this.calibrator.calibrate(claim, this.claimsLedger);
-            if (calibration.calibratedConfidence >= this.config.taskThreshold) {
-              success = true;
-              claim.confidence = calibration.calibratedConfidence;
-              this.logReasoning(`Correction successful! Calibrated confidence raised to ${calibration.calibratedConfidence}`);
+              const resolvedStatement = await this.config.onHITLRequest(
+                `Uncertainty threshold breach. Please verify claim: ${claim.statement}`
+              );
+              claim.statement = resolvedStatement;
+              claim.isExternalObservation = true;
+              claim.confidence = 1.0; // Restored high confidence after external HITL validation
+              
+              // Re-calibrate
+              calibration = this.calibrator.calibrate(claim, this.claimsLedger);
             }
           }
 
-          if (!success) {
+          // If still below threshold after attempt or budget exhausted
+          if (calibration.calibratedConfidence < this.config.taskThreshold) {
             milestone.status = 'failed';
-            this.logReasoning(`Correction budget exhausted. Structured failure returned.`);
             return {
               status: 'failed',
-              message: `Execution halted. Confidence calibration failed to meet threshold of ${this.config.taskThreshold} for milestone "${milestone.name}".`,
+              reason: `Uncertainty threshold breach could not be resolved. Budget exhausted.`,
             };
           }
         }
       }
+
+      // Milestone finalized successfully
       milestone.status = 'finalized';
     }
 
-    this.executionHistory.push(step);
-    this.logReasoning(`Step "${step.action}" completed successfully.`);
-    return { status: 'success', message: 'Step executed.' };
+    return { status: 'success' };
   }
 
-  private logReasoning(msg: string): void {
-    this.reasoningTrace.push(msg);
-  }
+  private propagateUncertainty(): void {
+    // If any claim has low confidence, propagate uncertainty flag to downstream milestones
+    for (const milestone of this.milestones) {
+      const associated = this.claimsLedger.filter((c) =>
+        milestone.associatedClaims.includes(c.id)
+      );
+      const hasLowConfidenceClaim = associated.some((c) => {
+        const res = this.calibrator.calibrate(c, this.claimsLedger);
+        return res.calibratedConfidence < this.config.taskThreshold;
+      });
+
+      if (hasLowConfidenceClaim) {
+        milestone.inheritedUncertainty = true;
+        // Propagate down to claims belonging to this milestone
+        for (const c of associated) {
+          c.inheritedUncertainty = true;
+        }
+      }
+    }
+  } 
 }
