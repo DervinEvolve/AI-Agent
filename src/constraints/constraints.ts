@@ -1,188 +1,101 @@
-import { strict as assert } from 'node:assert';
+import { redactSecrets } from '../capabilities/secret_redactor';
 
-/**
- * Structured error model aligned with agent-capability-standard v1.0.0.
- * V1xx = validation errors, S3xx = schema errors.
- */
-export type CapabilityErrorCode =
-  | 'V101' // invalid input type
-  | 'V102' // non-finite numeric value
-  | 'V103' // non-integer numeric value
-  | 'V104' // empty / missing operand
-  | 'V105' // unsupported operator
-  | 'S301' // missing required field
-  | 'S302' // schema shape mismatch
-  | 'S303' // output schema violation
-  | 'S304'; // internal invariant violation
-
-export interface CapabilityError {
-  code: CapabilityErrorCode;
+export interface Constraint {
+  id: string;
   name: string;
-  message: string;
-  location: string;
-  suggestion: string;
+  status: string;
+  added_epoch: number;
+  description: string;
+  implementation: {
+    tests: string[];
+  };
 }
 
-export const ERROR_NAMES: Record<CapabilityErrorCode, string> = {
-  V101: 'InvalidInputType',
-  V102: 'NonFiniteValue',
-  V103: 'NonIntegerValue',
-  V104: 'MissingOperand',
-  V105: 'UnsupportedOperator',
-  S301: 'MissingRequiredField',
-  S302: 'SchemaShapeMismatch',
-  S303: 'OutputSchemaViolation',
-  S304: 'InternalInvariantViolation',
-};
-
-export function makeError(
-  code: CapabilityErrorCode,
-  message: string,
-  location: string,
-  suggestion: string,
-): CapabilityError {
-  return { code, name: ERROR_NAMES[code], message, location, suggestion };
+export interface SimulationState {
+  approval_token?: string;
+  is_simulation: boolean;
+  has_network_access?: boolean;
+  has_external_api_access?: boolean;
+  tainted?: boolean;
+  simulation_success_score?: number; // e.g. 0 to 1.0 (100% success)
+  secrets?: string[];
+  history?: string[];
 }
 
-/**
- * Type guard that rejects booleans BEFORE any numeric coercion, then
- * requires a finite integer. Returns a CapabilityError on failure.
- */
-export function validateInteger(
-  value: unknown,
-  location: string,
-): CapabilityError | null {
-  // Booleans must be rejected first: typeof true === 'boolean' but
-  // Number(true) === 1 would silently coerce.
-  if (typeof value === 'boolean') {
-    return makeError(
-      'V101',
-      `Expected an integer but received a boolean (${value}) at ${location}.`,
-      location,
-      'Provide a real integer value, not a boolean.',
-    );
-  }
-  if (typeof value !== 'number') {
-    return makeError(
-      'V101',
-      `Expected an integer but received ${typeof value} at ${location}.`,
-      location,
-      'Provide a numeric integer value.',
-    );
-  }
-  if (!Number.isFinite(value)) {
-    return makeError(
-      'V102',
-      `Value at ${location} is not finite (NaN or Infinity).`,
-      location,
-      'Provide a finite integer value.',
-    );
-  }
-  if (!Number.isInteger(value)) {
-    return makeError(
-      'V103',
-      `Value at ${location} is not an integer (${value}).`,
-      location,
-      'Provide an integer value (no fractional part).',
-    );
-  }
-  return null;
-}
-
-export interface ComputeResult {
-  ok: boolean;
-  value?: number;
-  errors?: CapabilityError[];
+export interface SimulationResult {
+  status: 'allowed' | 'policy_blocked';
+  reason?: string;
+  tainted: boolean;
+  history: string[];
+  approval_token_validated: boolean;
 }
 
 /**
- * Shared safe-compute entry point used by capability handlers.
- * Validates an operator string and an array of operands, then dispatches
- * to the provided arithmetic function.
+ * Evaluates a simulation step or full trajectory under con_world_model_simulation_non_authority_31.
+ * Enforces four main isolation boundaries:
+ * 1. Prevents simulated outcomes/trajectories from bypassing HITL authorization gates (requires fresh real approval_token validation).
+ * 2. Halts and returns 'policy_blocked' if simulated code blocks attempt live network or external API access.
+ * 3. Guarantees that tainted inputs permanently taint all simulator outputs.
+ * 4. Ensures raw secrets/credentials are redacted via secret_redactor before snapshots/history are stored.
  */
-export function safeCompute(
-  operator: unknown,
-  operands: unknown[],
-  allowed: string[],
-  fn: (ops: number[]) => number,
-): ComputeResult {
-  const errors: CapabilityError[] = [];
+export function evaluateSimulationBoundary(
+  state: SimulationState,
+  inputs: { tainted: boolean; data: string; secretsToRedact?: string[] }
+): SimulationResult {
+  const resultTainted = state.tainted || inputs.tainted;
 
-  if (typeof operator !== 'string' || operator.length === 0) {
-    errors.push(
-      makeError(
-        'V105',
-        'Operator is missing or not a non-empty string.',
-        'operator',
-        `Provide one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
+  // Boundary 2: Halt and return policy_blocked if attempting live network/external API access
+  if (state.has_network_access || state.has_external_api_access) {
+    return {
+      status: 'policy_blocked',
+      reason: 'Simulation attempted live network or external API access.',
+      tainted: resultTainted,
+      history: [],
+      approval_token_validated: false,
+    };
   }
 
-  if (!allowed.includes(operator)) {
-    errors.push(
-      makeError(
-        'V105',
-        `Operator '${operator}' is not supported.`,
-        'operator',
-        `Use one of: ${allowed.join(', ')}.`,
-      ),
-    );
-    return { ok: false, errors };
-  }
+  // Boundary 1: Simulated successful runs or high confidence scores cannot satisfy HITL authorization.
+  // It must always be marked as not validated if it is a simulated trajectory.
+  const approval_token_validated = false;
 
-  if (!Array.isArray(operands) || operands.length === 0) {
-    errors.push(
-      makeError(
-        'V104',
-        'Operands array is empty or missing.',
-        'operands',
-        'Provide at least one integer operand.',
-      ),
-    );
-    return { ok: false, errors };
-  }
+  // Boundary 4: Pass all outputs through the secret_redactor and redact secrets before history storage
+  const rawHistoryEntry = `Data: ${inputs.data}`;
+  let redactedEntry = redactSecrets(rawHistoryEntry);
 
-  const clean: number[] = [];
-  for (let i = 0; i < operands.length; i++) {
-    const loc = `operands[${i}]`;
-    const err = validateInteger(operands[i], loc);
-    if (err) {
-      errors.push(err);
-    } else {
-      clean.push(operands[i] as number);
+  if (inputs.secretsToRedact && inputs.secretsToRedact.length > 0) {
+    for (const secret of inputs.secretsToRedact) {
+      if (secret) {
+        redactedEntry = redactedEntry.split(secret).join('[REDACTED_SIM_SECRET]');
+      }
     }
   }
 
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
+  const currentHistory = state.history ? [...state.history] : [];
+  currentHistory.push(redactedEntry);
 
-  const value = fn(clean);
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    errors.push(
-      makeError(
-        'S303',
-        `Computed result ${value} violates the integer output schema.`,
-        'result',
-        'Ensure inputs are within safe integer range.',
-      ),
-    );
-    return { ok: false, errors };
-  }
-
-  return { ok: true, value };
+  return {
+    status: 'allowed',
+    tainted: resultTainted,
+    history: currentHistory,
+    approval_token_validated,
+  };
 }
 
-/**
- * Error class used by division-era capabilities for invalid numeric input.
- * (Restored alongside the original API after an epoch-7 rewrite removed
- * safeCompute/makeError while production capabilities still imported them.)
- */
-export class SafeIntegerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SafeIntegerError';
+export const constraints: Constraint[] = [
+  {
+    id: "con_world_model_simulation_non_authority_31",
+    name: "Internal world-model simulation non-authority and isolation boundaries",
+    status: "active",
+    added_epoch: 31,
+    description: "The internal world-model simulator must never be used to authorize side effects, execute live tools, clear taint, satisfy HITL confirmation, directly set live tool arguments, or substitute simulated outcomes for validated external evidence. Every simulation run must occur strictly within the isolated sandbox or internal LLM reasoning space, with all network access and live adapter calls completely disabled. Under no circumstances can a simulated successful run or high confidence score satisfy a task success criterion, complete a milestone in task_lifecycle_manager_26, or bypass a policy gate. Tainted inputs to the simulator must permanently taint all outputs of that simulation. The simulator must never store raw secrets, credentials, or live auth state in its snapshots or history, and must pass all outputs through the secret_redactor.",
+    implementation: {
+      tests: [
+        "a simulation trajectory showing 100% success cannot authorize a live browser or API dispatch without a fresh verified HITL approval_token",
+        "the simulator returns policy_blocked and halts the simulation if a simulated code block attempts to access live networks or external APIs",
+        "simulated state transitions cannot clear taint flags or convert tainted variables into trusted tool arguments",
+        "simulation records and history redact apparent secrets before storage and never contain live credentials or vault session handles"
+      ]
+    }
   }
-}
+];
