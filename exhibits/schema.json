@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Observable Lab exhibit, version 1",
+  "description": "Data only. The lab server validates this again, and also enforces the 6,000 triangle estimate (see scripts/exhibits.ts), which a JSON schema cannot express.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "title", "description", "author_model", "placement", "palette", "parts"],
+  "$defs": {
+    "vec3": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+    "size": { "type": "array", "items": { "type": "number", "minimum": 0.01, "maximum": 2.0 }, "minItems": 3, "maxItems": 3 },
+    "position": { "type": "array", "items": { "type": "number", "minimum": -1.5, "maximum": 1.5 }, "minItems": 3, "maxItems": 3 },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape", "size", "position", "colour", "material"],
+      "properties": {
+        "shape": { "enum": ["box", "sphere", "cylinder", "cone", "torus", "capsule", "ring", "tube"] },
+        "size": { "$ref": "#/$defs/size" },
+        "position": { "$ref": "#/$defs/position" },
+        "rotation": { "type": "array", "items": { "type": "number", "minimum": -7, "maximum": 7 }, "minItems": 3, "maxItems": 3 },
+        "colour": { "type": "integer", "minimum": 0, "maximum": 5, "description": "Index into palette; must be below the palette length." },
+        "material": { "enum": ["wood", "brass", "glass", "paper", "stone", "ceramic", "leaf", "light"] },
+        "repeat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 1, "maximum": 24 },
+            "radial": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["radius"],
+              "properties": { "radius": { "type": "number", "minimum": 0, "maximum": 1.5 } }
+            },
+            "linear": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["step"],
+              "properties": { "step": { "$ref": "#/$defs/position" } }
+            }
+          }
+        },
+        "path": { "type": "array", "items": { "$ref": "#/$defs/position" }, "minItems": 2, "maxItems": 16, "description": "Tube only." }
+      }
+    }
+  },
+  "properties": {
+    "version": { "const": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "author_model": { "type": "string", "minLength": 1, "maxLength": 60, "description": "Filled in by the lab, not trusted from the model." },
+    "placement": { "enum": ["pedestal", "shelf", "wall", "ceiling", "floor"] },
+    "palette": { "type": "array", "items": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "minItems": 1, "maxItems": 6 },
+    "parts": { "type": "array", "items": { "$ref": "#/$defs/part" }, "minItems": 1, "maxItems": 64 },
+    "animation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "bob": { "type": "number", "minimum": 0, "maximum": 0.2 },
+        "pulse": { "type": "number", "minimum": 0, "maximum": 2 }
+      }
+    },
+    "label": { "type": "string", "minLength": 1, "maxLength": 40 }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "title": "Specimen jar",
+  "description": "A glass specimen jar with a brass lid, a brass base ring and a small leaf pinned inside. Placed here by the lab itself so the room has something on its shelf before any model has built one.",
+  "author_model": "Observable Lab",
+  "placement": "shelf",
+  "palette": ["#E8E4D9", "#B5A642", "#7CB342", "#8B7355"],
+  "parts": [
+    { "shape": "cylinder", "size": [0.16, 0.26, 0.16], "position": [0, 0.13, 0], "colour": 0, "material": "glass" },
+    { "shape": "cylinder", "size": [0.17, 0.04, 0.17], "position": [0, 0.28, 0], "colour": 1, "material": "brass" },
+    { "shape": "torus", "size": [0.17, 0.17, 0.02], "position": [0, 0.01, 0], "rotation": [1.5708, 0, 0], "colour": 1, "material": "brass" },
+    { "shape": "sphere", "size": [0.03, 0.03, 0.03], "position": [0, 0.32, 0], "colour": 1, "material": "brass" },
+    { "shape": "capsule", "size": [0.02, 0.1, 0.02], "position": [0, 0.1, 0], "colour": 2, "material": "leaf" },
+    { "shape": "box", "size": [0.06, 0.01, 0.03], "position": [0.03, 0.17, 0], "rotation": [0, 0, 0.5], "colour": 2, "material": "leaf", "repeat": { "count": 3, "radial": { "radius": 0.02 } } },
+    { "shape": "box", "size": [0.22, 0.02, 0.22], "position": [0, -0.01, 0], "colour": 3, "material": "wood" }
+  ],
+  "animation": { "bob": 0.01 },
+  "label": "Specimen 001"
+}
