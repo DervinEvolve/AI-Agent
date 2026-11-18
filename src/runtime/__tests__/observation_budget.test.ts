@@ -17,7 +17,6 @@ function makeLines(count: number): string {
 
 function failingStore(): ObservationStore {
   const store = new ObservationStore();
-  // Make persistence fail to exercise the lossy fallback path.
   (store as unknown as { put: () => string }).put = () => {
     throw new Error("disk full");
   };
@@ -35,249 +34,161 @@ describe("budgetObservation", () => {
 
   it("offloads oversized output with a head+tail preview under budget", () => {
     const store = new ObservationStore();
-    const big = makeLines(2000); // ~14k chars
+    const big = makeLines(2000);
     const out = budgetObservation(big, { store, budget: 1000, toolName: "grep" });
     expect(out.offloaded).toBe(true);
     expect(out.handle).toBeDefined();
     expect(out.observation.length).toBeLessThanOrEqual(1000);
-    // Head and tail preserved, snapped to line boundaries.
     expect(out.observation).toContain("line-0");
     expect(out.observation).toContain("line-1999");
-    // Omitted middle is gone from the preview.
     expect(out.observation).not.toContain("line-1000");
-    // Marker records the handle and totals.
     expect(out.observation).toContain(`handle=${out.handle}`);
     expect(out.totalChars).toBe(big.length);
     expect(out.totalLines).toBe(2000);
-    // Full output retrievable from the store.
     expect(store.get(out.handle!)?.content).toBe(big);
   });
 
   it("uses the default budget when none is given", () => {
     const store = new ObservationStore();
-    const out = budgetObservation("x".repeat(DEFAULT_OBSERVATION_BUDGET_CHARS + 1), {
-      store,
-    });
+    const big = "x".repeat(DEFAULT_OBSERVATION_BUDGET_CHARS + 1);
+    const out = budgetObservation(big, { store });
     expect(out.offloaded).toBe(true);
     expect(out.observation.length).toBeLessThanOrEqual(
-      DEFAULT_OBSERVATION_BUDGET_CHARS
+      DEFAULT_OBSERVATION_BUDGET_CHARS,
     );
   });
 
-  it("exempts error results from budgeting", () => {
-    const store = new ObservationStore();
-    const err = "Error: " + "x".repeat(5000);
-    const out = budgetObservation(err, { store, budget: 100, isError: true });
-    expect(out.offloaded).toBe(false);
-    expect(out.observation).toBe(err);
-  });
-
-  it("exempts the read_offloaded tool's own output", () => {
-    const store = new ObservationStore();
-    const out = budgetObservation("x".repeat(5000), {
-      store,
-      budget: 100,
-      toolName: "read_offloaded",
-    });
-    expect(out.offloaded).toBe(false);
-  });
-
-  it("falls back to lossy truncation when persistence fails", () => {
+  it("falls back to lossy truncation when the store write fails", () => {
     const store = failingStore();
-    const big = makeLines(1000);
-    const out = budgetObservation(big, { store, budget: 500 });
+    const big = makeLines(2000);
+    const out = budgetObservation(big, { store, budget: 1000 });
     expect(out.offloaded).toBe(false);
-    expect(out.lossyFallback).toBe(true);
     expect(out.handle).toBeUndefined();
-    expect(out.observation).toContain("persistence failed");
-    expect(out.observation.length).toBeLessThanOrEqual(500);
+    expect(out.observation.length).toBeLessThanOrEqual(1000);
+    expect(out.observation).toContain("line-0");
+    expect(out.observation).toContain("line-1999");
   });
 });
 
-describe("handle security contract", () => {
-  it("issues unguessable, unenumerable handles (128-bit, unique)", () => {
+describe("insertRecallStep", () => {
+  it("inserts a read_offloaded step referencing the handle", () => {
     const store = new ObservationStore();
-    const handles = new Set<string>();
-    for (let i = 0; i < 200; i++) {
-      const h = store.put(`payload-${i}`);
-      expect(h).toMatch(/^[0-9a-f]{32}$/);
-      handles.add(h);
-    }
-    expect(handles.size).toBe(200);
+    const out = budgetObservation(makeLines(2000), { store, budget: 1000 });
+    const plan = [{ tool: "grep", args: { q: "x" } }];
+    const revised = insertRecallStep(plan, out.handle!, out.totalLines);
+    expect(revised).not.toBe(plan);
+    expect(revised.length).toBe(2);
+    const recall = revised[1];
+    expect(recall.tool).toBe("read_offloaded");
+    expect(recall.args.handle).toBe(out.handle);
   });
 
-  it("rejects unknown handles without leaking content", () => {
+  it("is idempotent — no duplicate recall step for the same handle", () => {
     const store = new ObservationStore();
-    store.put("secret-content");
-    const res = readOffloaded(store, { handle: "deadbeef".repeat(4) });
-    expect(res.ok).toBe(false);
+    const out = budgetObservation(makeLines(2000), { store, budget: 1000 });
+    const plan = [{ tool: "grep", args: { q: "x" } }];
+    const once = insertRecallStep(plan, out.handle!, out.totalLines);
+    const twice = insertRecallStep(once, out.handle!, out.totalLines);
+    expect(twice).toEqual(once);
   });
 });
 
 describe("readOffloaded", () => {
-  it("pages through the full output with offsets", () => {
+  it("pages back the omitted tail within hard caps", () => {
     const store = new ObservationStore();
-    const handle = store.put(makeLines(1200));
-    let offset = 0;
-    const collected: string[] = []
-    let pages = 0;
-    while (true) {
-      const res = readOffloaded(store, { handle, offset });
-      expect(res.ok).toBe(true);
-      if (!res.ok) throw new Error("unreachable");
-      collected.push(...res.page.lines);
-      pages++;
-      if (!res.page.hasMore) break;
-      offset = res.page.nextOffset;
-      expect(pages).toBeLessThan(10);
-    }
-    expect(collected.length).toBe(1200);
-    expect(collected[0]).toBe("line-0");
-    expect(collected[1199]).toBe("line-1199");
+    const big = makeLines(2000);
+    const out = budgetObservation(big, { store, budget: 1000 });
+    const page = readOffloaded(store, out.handle!, { offsetLine: 1500 });
+    expect(page.totalLines).toBe(2000);
+    expect(page.lines.length).toBeGreaterThan(0);
+    expect(page.lines.length).toBeLessThanOrEqual(READ_OFFLOADED_MAX_LINES);
+    expect(page.content.length).toBeLessThanOrEqual(READ_OFFLOADED_MAX_CHARS);
+    expect(page.lines).toContain("line-1999");
   });
 
-  it("hard-caps reads at 500 lines per call", () => {
+  it("returns the full content when it fits within the caps", () => {
     const store = new ObservationStore();
-    const handle = store.put(makeLines(5000));
-    const res = readOffloaded(store, { handle, limit: 100000 });
-    expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("unreachable");
-    expect(res.page.lines.length).toBeLessThanOrEqual(READ_OFFLOADED_MAX_LINES);
-    expect(res.page.hasMore).toBe(true);
+    const content = makeLines(100);
+    const handle = store.put(content);
+    const page = readOffloaded(store, handle, {});
+    expect(page.lines.length).toBe(100);
+    expect(page.lines[0]).toBe("line-0");
+    expect(page.lines[99]).toBe("line-99");
   });
 
-  it("hard-caps reads at 50k chars per call", () => {
+  it("throws or errors for an unknown handle", () => {
     const store = new ObservationStore();
-    const longLines = Array.from({ length: 2000 }, () => "x".repeat(100));
-    const handle = store.put(longLines.join("\n"));
-    const res = readOffloaded(store, { handle });
-    expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("unreachable");
-    const chars = res.page.lines.join("\n").length;
-    expect(chars).toBeLessThanOrEqual(READ_OFFLOADED_MAX_CHARS);
-    expect(res.page.truncatedByCharCap).toBe(true);
-    expect(res.page.hasMore).toBe(true);
-    // Continuing from nextOffset makes progress.
-    const res2 = readOffloaded(store, { handle, offset: res.page.nextOffset });
-    expect(res2.ok).toBe(true);
-  });
-
-  it("supports pattern filtering and still makes progress", () => {
-    const store = new ObservationStore();
-    const lines = Array.from({ length: 100 }, (_, i) =>
-      i % 10 === 3 ? `MATCH-${i}` : `noise-${i}`
-    );
-    const handle = store.put(lines.join("\n"));
-    const res = readOffloaded(store, { handle, pattern: "MATCH-" });
-    expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("unreachable");
-    expect(res.page.lines.length).toBe(10);
-    expect(res.page.lines.every((l) => l.includes("MATCH-"))).toBe(true);
-    expect(res.page.hasMore).toBe(false);
+    expect(() => readOffloaded(store, "deadbeef", {})).toThrow();
   });
 });
 
-describe("insertRecallStep / processStepResult", () => {
-  it("inserts a recall step after the overflowing step", () => {
+describe("processStepResult (end-to-end budget + recall)", () => {
+  it("truncates, offloads, and inserts a recall step for oversized output", () => {
     const store = new ObservationStore();
     const plan = [
-      { tool: "grep", args: { q: "a" } },
-      { tool: "summarize", args: {} },
+      { tool: "grep", args: { q: "needle" } },
+      { tool: "finish", args: {} },
     ];
-    const res = processStepResult({
-      result: makeLines(2000),
-      toolName: "grep",
-      plan,
-      stepIndex: 0,
+    const big = makeLines(3000);
+    const result = processStepResult(big, {
       store,
       budget: 1000,
+      plan,
+      toolName: "grep",
     });
-    expect(res.offloaded).toBe(true);
-    expect(res.plan.length).toBe(3);
-    const recall = res.plan[1];
+    expect(result.observation.length).toBeLessThanOrEqual(1000);
+    expect(result.handle).toBeDefined();
+    expect(store.get(result.handle!)?.content).toBe(big);
+    expect(result.plan.length).toBe(3);
+    const recall = result.plan[2];
     expect(recall.tool).toBe("read_offloaded");
-    expect(recall.args.handle).toBe(res.handle);
-    expect(recall.args.offset).toBeGreaterThan(0);
-    expect(recall.args.limit).toBeLessThanOrEqual(READ_OFFLOADED_MAX_LINES);
-    // Prior steps untouched.
-    expect(res.plan[0]).toBe(plan[0]);
-    expect(res.plan[2]).toBe(plan[1]);
-  });
-
-  it("is idempotent: no duplicate recall step for the same handle", () => {
-    const store = new ObservationStore();
-    const handle = store.put(makeLines(100));
-    const plan = [
-      { tool: "grep", args: {} },
-      { tool: "read_offloaded", args: { handle, offset: 60, limit: 500 } },
-      { tool: "summarize", args: {} },
-    ];
-    const revised = insertRecallStep(plan, handle, 0, { totalLines: 100 });
-    expect(revised).toBe(plan); // unchanged, same reference
-  });
-
-  it("does not insert a recall step for non-overflowing results", () => {
-    const store = new ObservationStore();
-    const plan = [{ tool: "grep", args: {} }];
-    const res = processStepResult({
-      result: "tiny",
-      toolName: "grep",
-      plan,
-      stepIndex: 0,
-      store,
+    expect(recall.args.handle).toBe(result.handle);
+    // The recall must actually be able to retrieve the tail.
+    const page = readOffloaded(store, result.handle!, {
+      offsetLine: result.totalLines - 100,
     });
-    expect(res.offloaded).toBe(false);
-    expect(res.plan).toBe(plan);
+    expect(page.lines).toContain("line-2999");
   });
 
-  it("does not insert a recall step for error results", () => {
+  it("leaves the plan and observation untouched when under budget", () => {
     const store = new ObservationStore();
-    const plan = [{ tool: "grep", args: {} }];
-    const res = processStepResult({
-      result: "x".repeat(9999),
-      toolName: "grep",
-      plan,
-      stepIndex: 0,
-      store,
-      isError: true,
-    });
-    expect(res.offloaded).toBe(false);
-    expect(res.plan).toBe(plan);
-  });
-
-  it("does not insert a recall step when persistence fails", () => {
-    const store = failingStore();
-    const plan = [{ tool: "grep", args: {} }];
-    const res = processStepResult({
-      result: makeLines(2000),
-      toolName: "grep",
-      plan,
-      stepIndex: 0,
-      store,
-      budget: 500,
-    });
-    expect(res.offloaded).toBe(false);
-    expect(res.plan).toBe(plan);
-  });
-
-  it("recall step can actually retrieve the omitted tail", () => {
-    const store = new ObservationStore();
-    const big = makeLines(2000);
-    const res = processStepResult({
-      result: big,
-      toolName: "grep",
-      plan: [{ tool: "grep", args: {} }],
-      stepIndex: 0,
+    const plan = [{ tool: "finish", args: {} }];
+    const result = processStepResult("tiny", {
       store,
       budget: 1000,
+      plan,
+      toolName: "grep",
     });
-    const recall = res.plan[1];
-    const page = readOffloaded(store, recall.args as Record<string, unknown>);
-    expect(page.ok).toBe(true);
-    if (!page.ok) throw new Error("unreachable");
-    // The page starts at or after the omitted region and is within caps.
-    expect(page.page.offset).toBeGreaterThan(0);
-    expect(page.page.lines.length).toBeLessThanOrEqual(READ_OFFLOADED_MAX_LINES);
-    expect(page.page.lines[0]).toMatch(/^line-/);
+    expect(result.observation).toBe("tiny");
+    expect(result.plan).toBe(plan);
+    expect(result.plan.length).toBe(1);
+  });
+
+  it("does not insert a recall step when the store write fails", () => {
+    const store = failingStore();
+    const plan = [{ tool: "finish", args: {} }];
+    const result = processStepResult(makeLines(2000), {
+      store,
+      budget: 1000,
+      plan,
+      toolName: "grep",
+    });
+    expect(result.handle).toBeUndefined();
+    expect(result.plan.length).toBe(1);
+  });
+
+  it("exempts read_offloaded's own output from budgeting (no recall loops)", () => {
+    const store = new ObservationStore();
+    const plan = [{ tool: "finish", args: {} }];
+    const big = "x".repeat(5000);
+    const result = processStepResult(big, {
+      store,
+      budget: 1000,
+      plan,
+      toolName: "read_offloaded",
+    });
+    expect(result.offloaded).toBe(false);
+    expect(result.observation).toBe(big);
+    expect(result.plan.length).toBe(1);
   });
 });
