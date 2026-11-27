@@ -1,5 +1,19 @@
-import { LongTermMemory, MemoryEntry } from './cap_long_term_memory_3';
-import { ToolRegistry } from './cap_dynamic_tool_invention_6';
+export interface MemoryEntry {
+  id: string;
+  content: string;
+  metadata?: Record<string, any>;
+  timestamp: number;
+}
+
+export interface LongTermMemory {
+  store(entry: MemoryEntry): Promise<void>;
+  search(query: string): Promise<MemoryEntry[]>;
+  delete(id: string): Promise<void>;
+}
+
+export interface ToolRegistry {
+  [key: string]: any;
+}
 
 export interface SkillDefinition {
   id: string;

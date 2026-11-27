@@ -123,6 +123,7 @@ describe('BrowserSession & BROWSER_TOOL_METADATA', () => {
             runId: 'run_1',
             policy: { allowedHosts: ['example.com'] },
             pagePort: makePagePort(capOverride),
+            dnsResolver: async () => ['93.184.216.34'],
           }),
       ).toThrow();
     }

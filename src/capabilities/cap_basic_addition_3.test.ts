@@ -20,7 +20,7 @@ for (const expr of PASS) {
   const [op, ...rest] = expr.split(' ');
   const ops = rest.map(Number);
   test(`addition accepts: ${expr}`, () => {
-    const r = computeAddition(op, ops);
+    const r = computeAddition(op, [...ops]);
     assert.equal(r.ok, true);
     assert.ok(typeof r.value === 'number');
   });
@@ -28,7 +28,7 @@ for (const expr of PASS) {
 
 for (const [op, ops] of FAIL) {
   test(`addition rejects: ${String(op)} ${JSON.stringify(ops)}`, () => {
-    const r = computeAddition(op, ops);
+    const r = computeAddition(op, [...ops]);
     assert.equal(r.ok, false);
     assert.ok(r.errors && r.errors.length > 0);
   });

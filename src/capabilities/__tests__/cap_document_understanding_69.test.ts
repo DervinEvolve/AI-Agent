@@ -136,7 +136,7 @@ describe('DocumentUnderstandingCapability', () => {
         ok: true,
         artifact_id: 'a',
         extraction_id: '',
-        format: 'pdf',
+        format: 'pdf' as const,
         page_count: 2,
         sheet_elided_count: 0,
         warnings: [],
@@ -146,11 +146,11 @@ describe('DocumentUnderstandingCapability', () => {
         ok: true,
         artifact_id: 'a',
         extraction_id: '',
-        format: 'pdf',
+        format: 'pdf' as const,
         sheet_elided_count: 0,
         warnings: [],
         items: [
-          { page: 1, coordinate: '0-10', kind: 'text', text: 'hello' },
+          { page: 1, coordinate: '0-10', kind: 'text' as const, text: 'hello' },
         ],
         complete: true,
       })),
@@ -283,7 +283,7 @@ describe('DocumentUnderstandingCapability', () => {
     expect(validateStartupConfig(base).ok).toBe(true);
     expect(validateStartupConfig({ ...base, enabled: false }).ok).toBe(false);
     expect(validateStartupConfig({ ...base, artifactInputPath: undefined }).ok).toBe(false);
-    expect(validateStartupConfig({ ...base, parserPort: undefined }).ok).toBe(false);
+    expect(validateStartupConfig({ ...base, parserPort: undefined as unknown as typeof base.parserPort }).ok).toBe(false);
     expect(validateStartupConfig({ ...base, pdf: { ...base.pdf, id: '' } }).ok).toBe(false);
   });
 });

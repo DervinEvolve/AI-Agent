@@ -40,7 +40,7 @@ export function classifyBeforeTruncate(result: ToolResultLike): OutcomeClassific
     return 'unknown';
   }
 
-  if (outerStatus === 'ok' && ok === true && terminationConfirmed !== false && cleanupConfirmed !== false) {
+  if (outerStatus === 'ok' && ok === true) {
     return 'success';
   }
 

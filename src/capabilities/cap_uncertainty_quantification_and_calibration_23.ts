@@ -1,5 +1,9 @@
 export type ValidationStatus = "validated" | "tainted" | "unverifiable" | "evaluated" | "inherited_uncertainty";
 
+export interface UncertaintySignal {
+  value: number;
+}
+
 export interface UncertaintyEvidence {
   id?: string;
   valid?: boolean;

@@ -179,3 +179,18 @@ export class MockExecutionBackend implements ExecutionBackend {
     };
   }
 }
+
+export interface ExecuteCodeResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export async function executeCode(
+  _language: string,
+  code: string,
+  timeout_s?: number,
+): Promise<ExecuteCodeResult> {
+  const res = await new MockExecutionBackend().run({ code, timeout_s });
+  return { exitCode: res.exit_code, stdout: res.stdout, stderr: res.stderr };
+}

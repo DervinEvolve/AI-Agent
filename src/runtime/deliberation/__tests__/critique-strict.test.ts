@@ -4,7 +4,7 @@ import { DELIBERATION_CAPS } from '../types';
 
 const MAX = DELIBERATION_CAPS.maxCritiqueBytesHard; // 4096
 
-function reasonOf(text: unknown, max = MAX): string {
+function reasonOf(text: unknown, max: number = MAX): string {
   const r = parseCritique(text, max);
   if (r.ok) return 'ok';
   return r.reason;

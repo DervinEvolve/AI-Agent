@@ -2,8 +2,18 @@
 // Division capability: handles division queries for two finite safe integers,
 // returning Euclidean quotient and remainder with educational explanation.
 
-import type { Capability, CapabilityContext } from '../types.js';
 import { SafeIntegerError } from '../constraints/constraints';
+
+export interface CapabilityContext {
+  userMessage: string;
+}
+
+export interface Capability {
+  id: string;
+  name: string;
+  description: string;
+  execute(context: CapabilityContext): Promise<string>;
+}
 
 const DIVISION_TRIGGER_PATTERNS = [
   /(?:what is|compute|calculate|evaluate|find|solve)?\s*(?:the\s+)?(?:integer\s+)?division\s+(?:of\s+)?(-?\d+)\s*(?:\/|÷|divided\s+by|over)\s*(-?\d+)/i,

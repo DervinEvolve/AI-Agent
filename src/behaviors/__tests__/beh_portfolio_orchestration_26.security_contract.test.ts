@@ -120,7 +120,7 @@ describe("checkpoint + deterministic resume", () => {
     ];
     const cp = checkpointPortfolio(tasks);
     // Approval tokens are never part of the checkpoint payload.
-    expect((cp as Record<string, unknown>).approvalTokens).toBeUndefined();
+    expect((cp as unknown as Record<string, unknown>).approvalTokens).toBeUndefined();
     const resumed = resumeFromCheckpoint(cp);
     expect(resumed.requiresFreshApproval).toContain("approve_me");
   });

@@ -11,6 +11,18 @@ describe('ToolRegistry', () => {
     expect(res.status).toBe('ok');
     expect(res.output).toBe(4);
     expect(res.call_id).toBeTruthy();
+    expect(res.termination_confirmed).toBe(true);
+  });
+  it('confirms termination when a started tool throws', async () => {
+    const r = new ToolRegistry();
+    r.register('boom', 'd', { type: 'object' }, async () => {
+      throw new Error('kaboom');
+    });
+    const res = await r.call('boom', {});
+    expect(res.status).toBe('error');
+    expect(res.started).toBe(true);
+    expect(res.error).toContain('kaboom');
+    expect(res.termination_confirmed).toBe(true);
   });
   it('rejects invalid args without starting', async () => {
     const r = new ToolRegistry();

@@ -1,5 +1,13 @@
 import { strict as assert } from 'node:assert';
 
+export interface Constraint {
+  id: string;
+  name: string;
+  status: string;
+  description: string;
+  added_epoch?: number;
+}
+
 /**
  * Structured error model aligned with agent-capability-standard v1.0.0.
  * V1xx = validation errors, S3xx = schema errors.

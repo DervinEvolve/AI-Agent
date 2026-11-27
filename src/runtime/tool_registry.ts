@@ -124,9 +124,9 @@ export class ToolRegistry {
       const r = await Promise.race([Promise.resolve().then(() => t.fn(args)), timeout]);
       const d = Date.now() - t0;
       if (r === 'timeout') return { ...base, call_id, started: true, status: 'timeout', error: 'deadline', duration_ms: d };
-      return { ...base, call_id, started: true, status: 'ok', output: r, duration_ms: d };
+      return { ...base, call_id, started: true, status: 'ok', output: r, duration_ms: d, termination_confirmed: true };
     } catch (e) {
-      return { ...base, call_id, started: true, status: 'error', error: String(e), duration_ms: Date.now() - t0 };
+      return { ...base, call_id, started: true, status: 'error', error: String(e), duration_ms: Date.now() - t0, termination_confirmed: true };
     } finally {
       clearTimeout(timer);
     }

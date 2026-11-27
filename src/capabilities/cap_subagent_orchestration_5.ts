@@ -24,7 +24,7 @@ export function spawn_subagents(input: SubAgentInput, currentDepth = 0, parentTr
 
     // Simulate isolated execution (no parent memory scope access)
     let status: SubAgentResult['status'] = 'succeeded';
-    let final_answer = `Isolated result for: ${subtask.goal}`;
+    let final_answer: string | null = `Isolated result for: ${subtask.goal}`;
     let criteria_results = subtask.success_criteria.map((c: string) => ({ criterion: c, passed: true }));
     let tainted = true;
     const provenance = [`parent:${traceId}`, `subtask:${subtask.goal}`];

@@ -220,7 +220,7 @@ function tokenize(value: string): Set<string> {
   return new Set(value.toLowerCase().split(/[^a-z0-9]+/u).filter((part) => part.length > 2));
 }
 
-export function redactExperienceText(input: unknown, maxChars = DEFAULT_EXPERIENCE_CURATOR_LIMITS.max_experience_chars): string {
+export function redactExperienceText(input: unknown, maxChars: number = DEFAULT_EXPERIENCE_CURATOR_LIMITS.max_experience_chars): string {
   let text = String(input ?? '');
   text = text.replace(/<\/?(?:chain[-_ ]?of[-_ ]?thought|cot|hidden[-_ ]?instructions?)[^>]*>/giu, REDACTION);
   text = text.replace(/(?:chain[-_ ]?of[-_ ]?thought|hidden[-_ ]?instructions?|raw[-_ ]?prompt)\s*[:=]\s*[^\n;]+/giu, `$1: ${REDACTION}`);
@@ -307,7 +307,7 @@ export class InMemoryExperienceBuffer {
   list(scope: ExperienceScope): ExperienceRecord[] {
     return (this.orderByScope.get(scopeKey(scope)) ?? [])
       .map((id) => this.records.get(id))
-      .filter((record): record is ExperienceRecord => Boolean(record) && !record.deleted);
+      .filter((record): record is ExperienceRecord => record !== undefined && !record.deleted);
   }
 
   retrieve(scope: ExperienceScope, query: ExperienceQuery, max = this.limits.max_retrieved_experiences_per_context): RetrievedExperience[] {
